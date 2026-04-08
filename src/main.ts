@@ -69,6 +69,7 @@ import type { ReleaseSettings } from "./UpdateManager";
 import { SyncSettingsManager } from "./SyncSettings";
 import { ContentAddressedFileStore, isSyncFile } from "./SyncFile";
 import { isDocument } from "./Document";
+import { diffMatchPatch } from "./y-diffMatchPatch";
 import { EndpointManager, type EndpointSettings } from "./EndpointManager";
 import { generateHash } from "./hashing";
 import { SelfHostModal } from "./ui/SelfHostModal";
@@ -1065,30 +1066,39 @@ export default class Live extends Plugin {
 					if (file && isSyncFile(file)) {
 						file.sync();
 					}
-
-					// Send DISK_CHANGED to HSM for documents with active lock
-					// (but not when we're the ones doing the save)
-					if (
-						file &&
-						isDocument(file) &&
-						file.hsm &&
-						!file.isSaving &&
-						tfile instanceof TFile
-					) {
-						try {
-							const contents = await this.app.vault.read(tfile);
-							const encoder = new TextEncoder();
-							const hash = await generateHash(encoder.encode(contents).buffer);
-							file.hsm.send({
-								type: 'DISK_CHANGED',
-								contents,
-								mtime: tfile.stat.mtime,
-								hash,
-							});
-						} catch (e) {
-							vaultLog("Failed to send DISK_CHANGED to HSM", e);
-						}
+				// If the document has an active HSM lock, route the disk change through
+				// the state machine (handles files currently open in the editor).
+				// Otherwise fall back to diffMatchPatch for files that were modified
+				// externally while closed (MegaMem CLI, Claude Code, Obsidian Bases,
+				// Quadro, rename link-updates) — prevents false merge conflicts.
+				if (
+					file &&
+					isDocument(file) &&
+					file.hsm &&
+					!file.isSaving &&
+					tfile instanceof TFile
+				) {
+					try {
+						const contents = await this.app.vault.read(tfile);
+						const encoder = new TextEncoder();
+						const hash = await generateHash(encoder.encode(contents).buffer);
+						file.hsm.send({
+							type: 'DISK_CHANGED',
+							contents,
+							mtime: tfile.stat.mtime,
+							hash,
+						});
+					} catch (e) {
+						vaultLog("Failed to send DISK_CHANGED to HSM", e);
 					}
+				} else if (file && isDocument(file) && !file.hsm && flags().enableAutomaticDiffResolution) {
+					folder.read(file).then((diskContents) => {
+						const normalized = diskContents.replace(/\r\n/g, "\n");
+						if (file.text !== normalized) {
+							diffMatchPatch(file.ydoc, normalized, file);
+						}
+					}).catch(() => {});
+				}
 
 					// Dataview race condition
 					this.timeProvider.setTimeout(() => {
