@@ -1066,11 +1066,11 @@ export default class Live extends Plugin {
 					if (file && isSyncFile(file)) {
 						file.sync();
 					}
-				// If the document has an active HSM lock, route the disk change through
-				// the state machine (handles files currently open in the editor).
-				// Otherwise fall back to diffMatchPatch for files that were modified
-				// externally while closed (MegaMem CLI, Claude Code, Obsidian Bases,
-				// Quadro, rename link-updates) — prevents false merge conflicts.
+				// Send DISK_CHANGED to HSM for documents with active lock
+				// (but not when we're the ones doing the save).
+				// For files modified externally while closed (no HSM): the HSM
+				// architecture handles this via ACQUIRE_LOCK editorContent on open,
+				// which triggers a 3-way merge that auto-resolves "local-only" changes.
 				if (
 					file &&
 					isDocument(file) &&
@@ -1091,13 +1091,6 @@ export default class Live extends Plugin {
 					} catch (e) {
 						vaultLog("Failed to send DISK_CHANGED to HSM", e);
 					}
-				} else if (file && isDocument(file) && !file.hsm && flags().enableAutomaticDiffResolution) {
-					folder.read(file).then((diskContents) => {
-						const normalized = diskContents.replace(/\r\n/g, "\n");
-						if (file.text !== normalized) {
-							diffMatchPatch(file.ydoc, normalized, file);
-						}
-					}).catch(() => {});
 				}
 
 					// Dataview race condition
