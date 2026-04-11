@@ -58,6 +58,11 @@ vision/
 .memory/
 infra/
 playwright/
+
+# roo
+.roo/mcp.json
+.roo/rules
+$null
 scripts/
 templates/
 unit/
