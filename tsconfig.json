@@ -12,20 +12,23 @@
     "importHelpers": true,
     "isolatedModules": true,
 	"strictNullChecks": true,
-    "allowSyntheticDefaultImports": true,
-    "lib": [
-      "DOM",
-      "ES5",
-      "ES6",
-      "ES7"
-    ]
-  },
-  "include": [
-    "**/*.ts"
-  ],
-  "exclude": [
-    "**/*.test.ts",
-    "node_modules",
-    "vaults"
-  ]
+	   "allowSyntheticDefaultImports": true,
+	   "noEmit": true,
+	   "lib": [
+	     "DOM",
+	     "ES5",
+	     "ES6",
+	     "ES7"
+	   ]
+	 },
+	 "include": [
+	   "**/*.ts"
+	 ],
+	 "exclude": [
+	   "**/*.test.ts",
+	   "node_modules",
+	   "vaults",
+	   "archive",
+	   "src/storage/y-indexeddb.js"
+	 ]
 }

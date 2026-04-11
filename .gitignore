@@ -1,8 +1,9 @@
 # roo local config (contains PATs — never commit)
 .roo/
 
-# vscode
-.vscode
+# vscode — exclude developer-specific configs but commit shared project settings
+.vscode/*
+!.vscode/settings.json
 
 # Intellij
 *.iml
