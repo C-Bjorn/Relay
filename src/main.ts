@@ -69,7 +69,6 @@ import type { ReleaseSettings } from "./UpdateManager";
 import { SyncSettingsManager } from "./SyncSettings";
 import { ContentAddressedFileStore, isSyncFile } from "./SyncFile";
 import { isDocument } from "./Document";
-import { diffMatchPatch } from "./y-diffMatchPatch";
 import { EndpointManager, type EndpointSettings } from "./EndpointManager";
 import { generateHash } from "./hashing";
 import { SelfHostModal } from "./ui/SelfHostModal";
