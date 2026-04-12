@@ -186,6 +186,9 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	// Last known editor text (for drift detection)
 	private lastKnownEditorText: string | null = null;
 
+	// Per-folder conflict auto-resolve preference callback (Fix 4)
+	private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local';
+
 	// Y.Text observer for converting remote deltas to positioned changes
 	private localTextObserver:
 		| ((event: Y.YTextEvent, tr: Y.Transaction) => void)
@@ -290,6 +293,7 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 		this._isProviderSynced = config.isProviderSynced ?? (() => this._bridge.providerSynced);
 		this._replayMode = config.replayMode ?? false;
 		this._yaml = config.yaml ?? null;
+		this._getAutoResolveConflicts = config.getAutoResolveConflicts ?? (() => 'none');
 		this._captureOpts = {
 			scope: "contents",
 			trackedOrigins: new Set([DISK_ORIGIN, MACHINE_EDIT_ORIGIN]),
@@ -1315,8 +1319,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 					base: e.base,
 					ours: e.ours,
 					theirs: e.theirs,
-					oursLabel: e.oursLabel ?? "Editor",
-					theirsLabel: e.theirsLabel ?? "Disk",
+					oursLabel: e.oursLabel ?? "Remote",
+					theirsLabel: e.theirsLabel ?? "Local",
 					conflictRegions,
 					resolvedIndices: new Set(),
 					positionedConflicts,
@@ -1940,6 +1944,18 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 		const mergeResult = performThreeWayMerge(lcaContent, diskContent, crdtContent);
 
 		if (!mergeResult.success) {
+			// Check per-folder auto-resolve preference before creating a fork.
+			const autoResolve = this._getAutoResolveConflicts();
+			if (autoResolve === 'remote') {
+				// Silently accept the server/CRDT state — disk was written by an
+				// external tool (MegaMem, Claude Code) and the live-editor wins.
+				if (signal.aborted) return { success: false };
+				return { success: true, mergedContent: crdtContent, needsSync: false };
+			} else if (autoResolve === 'local') {
+				// Silently accept the disk/external write and push it to the server.
+				if (signal.aborted) return { success: false };
+				return { success: true, mergedContent: diskContent, needsSync: true };
+			}
 			// When LCA exists, create a fork so fork-reconcile can attempt
 			// resolution once the provider syncs with authoritative remote state.
 			if (this._lca) {
@@ -2248,8 +2264,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 			base: "", // No baseline available
 			ours: localText,
 			theirs: diskText,
-			oursLabel: "Editor",
-			theirsLabel: "Disk",
+			oursLabel: "Remote",
+			theirsLabel: "Local",
 			conflictRegions: [], // No regions - entire content is in conflict
 			resolvedIndices: new Set(),
 			positionedConflicts: [],
@@ -2318,8 +2334,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 				base: baseText,
 				ours: localText,
 				theirs: diskText,
-				oursLabel: "Editor",
-				theirsLabel: "Disk",
+				oursLabel: "Remote",
+				theirsLabel: "Local",
 				conflictRegions: mergeResult.conflictRegions ?? [],
 				resolvedIndices: new Set(),
 				positionedConflicts: this.calculateConflictPositions(

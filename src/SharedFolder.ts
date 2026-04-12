@@ -74,6 +74,8 @@ export interface SharedFolderSettings {
 	connect?: boolean;
 	localOnly?: boolean;
 	sync?: SyncFlags;
+	/** Per-folder conflict auto-resolution preference. Default: 'none' (show UI). */
+	autoResolveConflicts?: 'none' | 'remote' | 'local';
 }
 
 interface Operation {
@@ -153,6 +155,7 @@ export class SharedFolder extends HasProvider {
 	_remote?: RemoteSharedFolder;
 	_shouldConnect: boolean;
 	private _localOnly: boolean;
+	private _autoResolveConflicts: 'none' | 'remote' | 'local' = 'none';
 	destroyed: boolean = false;
 	public vault: Vault;
 	syncStore: SyncStore;
@@ -223,6 +226,7 @@ export class SharedFolder extends HasProvider {
 		this.relayId = relayId;
 		this._shouldConnect = this.settings.connect ?? true;
 		this._localOnly = this.settings.localOnly ?? false;
+		this._autoResolveConflicts = this.settings.autoResolveConflicts ?? 'none';
 
 		this.authoritative = authoritative;
 
@@ -358,8 +362,9 @@ export class SharedFolder extends HasProvider {
 				};
 			},
 			userId: loginManager?.user?.id,
-			yaml: { parse: parseYaml, stringify: stringifyYaml },
-		});
+				yaml: { parse: parseYaml, stringify: stringifyYaml },
+				getAutoResolveConflicts: () => this._autoResolveConflicts,
+			});
 
 		// Create per-folder recording bridge and register with the debug API.
 		this.recordingBridge = new E2ERecordingBridge({
@@ -833,6 +838,19 @@ export class SharedFolder extends HasProvider {
 		}));
 		const guids = Array.from(this.files.keys());
 		this.mergeManager?.setLocalOnly(guids, value);
+	}
+
+	public get autoResolveConflicts(): 'none' | 'remote' | 'local' {
+		return this._autoResolveConflicts;
+	}
+
+	public set autoResolveConflicts(value: 'none' | 'remote' | 'local') {
+		if (this._autoResolveConflicts === value) return;
+		this._autoResolveConflicts = value;
+		this._settings.update((current) => ({
+			...current,
+			autoResolveConflicts: value,
+		}));
 	}
 
 	async netSync() {
@@ -2214,6 +2232,24 @@ export class SharedFolder extends HasProvider {
 			return;
 		}
 		this.unsubscribes.push(cb);
+	}
+
+	/**
+	 * Reset all persisted HSM state for this folder.
+	 *
+	 * Wipes all LCA, fork, and deferredConflict records from the HSMStore so
+	 * that HSMs reinitialize from a clean baseline on next file open.  Also
+	 * clears MergeManager's in-memory LCA and state-vector caches so stale
+	 * metadata doesn't persist in RAM after the IDB wipe.
+	 *
+	 * Use case: after upgrading from 0.7.5 → 0.8.x, previously-resolved
+	 * conflicts can re-appear because the HSM state store was not migrated.
+	 * Calling this method gives the team a "clear slate" without losing any
+	 * actual document content.
+	 */
+	async resetHSMState(): Promise<void> {
+		await this._hsmStore.clearAllData();
+		this.mergeManager?.clearPersistedStateForFolder();
 	}
 
 	destroy() {

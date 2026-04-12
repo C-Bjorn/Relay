@@ -823,6 +823,13 @@ export interface MergeHSMConfig {
 		parse: (yaml: string) => any;
 		stringify: (obj: any) => string;
 	};
+
+	/**
+	 * Callback to get the current per-folder auto-resolve preference.
+	 * Called at idle merge time so runtime setting changes take effect immediately.
+	 * Defaults to () => 'none' (show conflict UI, no automatic resolution).
+	 */
+	getAutoResolveConflicts?: () => 'none' | 'remote' | 'local';
 }
 
 // =============================================================================

@@ -134,6 +134,13 @@ export interface MergeManagerConfig {
 
   /** YAML parser/serializer for frontmatter Y.Map mirroring. Omit to disable. */
   yaml?: { parse: (yaml: string) => any; stringify: (obj: any) => string };
+
+  /**
+   * Callback to get the current per-folder auto-resolve preference.
+   * Called at merge time so runtime setting changes take effect immediately.
+   * Defaults to () => 'none' (manual resolution).
+   */
+  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local';
 }
 
 export interface PollOptions {
@@ -270,6 +277,7 @@ export class MergeManager {
   private userId?: string;
   private _yaml: { parse: (yaml: string) => any; stringify: (obj: any) => string } | null = null;
   private _onTransition?: (guid: string, path: string, info: { from: import('./types').StatePath; to: import('./types').StatePath; event: import('./types').MergeEvent; effects: import('./types').MergeEffect[] }) => void;
+  private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local';
 
   constructor(config: MergeManagerConfig) {
     this._getVaultId = config.getVaultId;
@@ -286,6 +294,7 @@ export class MergeManager {
     this.userId = config.userId;
     this._yaml = config.yaml ?? null;
     this._onTransition = config.onTransition;
+    this._getAutoResolveConflicts = config.getAutoResolveConflicts ?? (() => 'none');
 
     // Hibernation defaults
     this._hibernateTimeoutMs = config.hibernation?.hibernateTimeoutMs ?? 60_000;
@@ -392,6 +401,7 @@ export class MergeManager {
       userId: this.userId,
       diskLoader: getDiskContent,
       yaml: this._yaml ?? undefined,
+      getAutoResolveConflicts: this._getAutoResolveConflicts,
     });
 
     // Wire push-based transition callback for recording
@@ -1004,6 +1014,28 @@ export class MergeManager {
   getIdleHSM(guid: string): MergeHSM | undefined {
     const doc = this._getDocument(guid);
     return doc?.hsm ?? undefined;
+  }
+
+  /**
+   * Get the HSM for a document by GUID, regardless of lock state.
+   * Used by vault.on("modify") to send DISK_CHANGED to idle HSMs
+   * when the Document has no lock held (file.hsm may be null in sub-case B).
+   *
+   * Returns null if the document is not registered or has no HSM.
+   */
+  getHSMForGuid(guid: string): MergeHSM | null {
+    const doc = this._getDocument(guid);
+    return doc?.hsm ?? null;
+  }
+
+  /**
+   * Clear the in-memory LCA and state-vector caches for all registered documents.
+   * Called by SharedFolder.resetHSMState() after wiping the HSMStore so that
+   * re-opened HSMs start fresh without stale cached metadata.
+   */
+  clearPersistedStateForFolder(): void {
+    this._lcaCache.clear();
+    this._localStateVectorCache.clear();
   }
 
   /**

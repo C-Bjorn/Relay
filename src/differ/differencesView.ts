@@ -246,8 +246,8 @@ export class DifferencesView extends ItemView {
 			cls: "flex flex-row gap-1 py-0-5",
 		});
 
-		const oursLabel = this.state?.oursLabel ?? "Editor";
-		const theirsLabel = this.state?.theirsLabel ?? "Disk";
+		const oursLabel = this.state?.oursLabel ?? "Remote";
+		const theirsLabel = this.state?.theirsLabel ?? "Local";
 
 		// Left file (top)
 		new ActionLineButton({
@@ -446,12 +446,14 @@ export class DifferencesView extends ItemView {
 			return;
 		}
 
-		const containerRect = this.contentEl
-			.getElementsByClassName("file-diff__container")[0]
-			.getBoundingClientRect();
-		const elementRect = this.contentEl
-			.getElementsByClassName("difference")[0]
-			.getBoundingClientRect();
+		const container = this.contentEl.getElementsByClassName("file-diff__container")[0];
+		const element = this.contentEl.getElementsByClassName("difference")[0];
+		if (!container || !element) {
+			return;
+		}
+
+		const containerRect = container.getBoundingClientRect();
+		const elementRect = element.getBoundingClientRect();
 		this.contentEl.scrollTo({
 			top: elementRect.top - containerRect.top - 100,
 			behavior: "smooth",

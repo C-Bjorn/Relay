@@ -10,7 +10,7 @@
 	import SettingItem from "./SettingItem.svelte";
 	import type Live from "src/main";
 	import { SharedFolders, type SharedFolder } from "src/SharedFolder";
-	import { debounce } from "obsidian";
+	import { debounce, Notice } from "obsidian";
 	import { createEventDispatcher, onMount } from "svelte";
 	import { derived, writable } from "svelte/store";
 	import type { ObservableMap } from "src/observable/ObservableMap";
@@ -125,6 +125,32 @@
 
 	let syncSettings: SyncSettingsManager | undefined =
 		$folderStore?.syncSettingsManager;
+
+	// ── Fix 4: per-folder auto-resolve setting ─────────────────────────────
+	type AutoResolve = 'none' | 'remote' | 'local';
+	let autoResolve: AutoResolve = $folderStore?.autoResolveConflicts ?? 'none';
+
+	function onAutoResolveChange() {
+		if ($folderStore) {
+			$folderStore.autoResolveConflicts = autoResolve;
+		}
+	}
+
+	// ── Fix 5: reset HSM state ──────────────────────────────────────────────
+	let resetting = false;
+
+	async function handleResetSyncState() {
+		if (!$folderStore || resetting) return;
+		resetting = true;
+		try {
+			await $folderStore.resetHSMState();
+			new Notice(`Relay: Sync state reset for "${$folderStore.path}". Re-open files to apply.`);
+		} catch (e) {
+			new Notice(`Relay: Failed to reset sync state: ${e}`);
+		} finally {
+			resetting = false;
+		}
+	}
 
 	let noStorage = derived(
 		[folderStore, relayRoles],
@@ -585,6 +611,35 @@
 		{/if}
 		</SettingGroup>
 	</div>
+
+	<SettingItemHeading name="Conflict resolution"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Auto-resolve conflicts"
+			description="When an external write (MegaMem, Claude Code) conflicts with a live editor — which version wins automatically?"
+		>
+			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
+				<option value="none">Manual — show conflict UI</option>
+				<option value="remote">Prefer Remote — accept server/editor state</option>
+				<option value="local">Prefer Local — accept external writes</option>
+			</select>
+		</SettingItem>
+	</SettingGroup>
+
+	<SettingItemHeading name="Maintenance"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Reset sync state"
+			description="Clears all persisted merge history (LCA, fork, deferred conflicts). Use after an upgrade if resolved conflicts keep reappearing. Document content is not affected."
+		>
+			<button
+				disabled={resetting}
+				on:click={debounce(() => { handleResetSyncState(); })}
+			>
+				{resetting ? "Resetting…" : "Reset sync state"}
+			</button>
+		</SettingItem>
+	</SettingGroup>
 {/if}
 
 <div class="spacer"></div>

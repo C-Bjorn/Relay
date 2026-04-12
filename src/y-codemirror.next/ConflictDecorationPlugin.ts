@@ -110,7 +110,7 @@ class ConflictRemoteContentWidget extends WidgetType {
     // Separator
     const separator = document.createElement('div');
     separator.className = 'cm-conflict-separator';
-    separator.textContent = '═══════════ Remote/Disk ═══════════';
+    separator.textContent = '═══════════ Remote / Local ═══════════';
     container.appendChild(separator);
 
     // Remote content
@@ -326,35 +326,36 @@ export const conflictDecorationTheme = EditorView.baseTheme({
     filter: 'brightness(0.95)',
   },
   '.cm-conflict-btn-local': {
-    backgroundColor: 'rgba(40, 167, 69, 0.2)',
-    borderColor: 'rgba(40, 167, 69, 0.5)',
+    backgroundColor: 'color-mix(in srgb, var(--color-green) 20%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--color-green) 50%, transparent)',
     color: 'var(--text-normal)',
   },
   '.cm-conflict-btn-local:hover': {
-    backgroundColor: 'rgba(40, 167, 69, 0.35)',
+    backgroundColor: 'color-mix(in srgb, var(--color-green) 35%, transparent)',
   },
   '.cm-conflict-btn-remote': {
-    backgroundColor: 'rgba(0, 123, 255, 0.2)',
-    borderColor: 'rgba(0, 123, 255, 0.5)',
+    backgroundColor: 'color-mix(in srgb, var(--interactive-accent) 20%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--interactive-accent) 50%, transparent)',
     color: 'var(--text-normal)',
   },
   '.cm-conflict-btn-remote:hover': {
-    backgroundColor: 'rgba(0, 123, 255, 0.35)',
+    backgroundColor: 'color-mix(in srgb, var(--interactive-accent) 35%, transparent)',
   },
   '.cm-conflict-btn-both': {
-    backgroundColor: 'rgba(108, 117, 125, 0.2)',
-    borderColor: 'rgba(108, 117, 125, 0.5)',
+    backgroundColor: 'color-mix(in srgb, var(--text-muted) 20%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--text-muted) 50%, transparent)',
     color: 'var(--text-normal)',
   },
   '.cm-conflict-btn-both:hover': {
-    backgroundColor: 'rgba(108, 117, 125, 0.35)',
+    backgroundColor: 'color-mix(in srgb, var(--text-muted) 35%, transparent)',
   },
   '.cm-conflict-local-content': {
-    backgroundColor: 'rgba(40, 167, 69, 0.12)',
-    borderLeft: '3px solid rgba(40, 167, 69, 0.5)',
+    backgroundColor: 'color-mix(in srgb, var(--color-green) 20%, transparent)',
+    borderLeft: '3px solid color-mix(in srgb, var(--color-green) 60%, transparent)',
+    color: 'var(--text-normal)',
   },
   '.cm-conflict-remote-container': {
-    borderLeft: '3px solid rgba(0, 123, 255, 0.5)',
+    borderLeft: '3px solid color-mix(in srgb, var(--interactive-accent) 50%, transparent)',
     marginLeft: '0',
   },
   '.cm-conflict-separator': {
@@ -366,10 +367,12 @@ export const conflictDecorationTheme = EditorView.baseTheme({
     fontFamily: 'monospace',
   },
   '.cm-conflict-remote-content': {
-    backgroundColor: 'rgba(0, 123, 255, 0.12)',
+    backgroundColor: 'color-mix(in srgb, var(--interactive-accent) 20%, transparent)',
+    borderLeft: '3px solid color-mix(in srgb, var(--interactive-accent) 60%, transparent)',
     padding: '4px 8px',
     fontFamily: 'var(--font-monospace)',
     fontSize: 'var(--font-text-size)',
+    color: 'var(--text-normal)',
   },
   '.cm-conflict-end-marker': {
     textAlign: 'center',

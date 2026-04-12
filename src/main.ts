@@ -1092,6 +1092,36 @@ export default class Live extends Plugin {
 						vaultLog("Failed to send DISK_CHANGED to HSM", e);
 					}
 				}
+	
+				// Sub-case B (Fix 1): file.hsm is null because the Document was created
+				// before MergeManager initialized (or ensureHSM() raced with the modify
+				// event). Reach into MergeManager to find a registered HSM by GUID and
+				// deliver DISK_CHANGED directly so external tool writes (MegaMem, etc.)
+				// are reflected in the CRDT without requiring a manual file open.
+				if (
+					file &&
+					isDocument(file) &&
+					!file.hsm &&
+					!file.isSaving &&
+					tfile instanceof TFile
+				) {
+					const hsm = folder.mergeManager?.getHSMForGuid(file.guid);
+					if (hsm) {
+						try {
+							const contents = await this.app.vault.read(tfile);
+							const encoder = new TextEncoder();
+							const hash = await generateHash(encoder.encode(contents).buffer);
+							hsm.send({
+								type: 'DISK_CHANGED',
+								contents,
+								mtime: tfile.stat.mtime,
+								hash,
+							});
+						} catch (e) {
+							vaultLog("Failed to send DISK_CHANGED to idle HSM", e);
+						}
+					}
+				}
 
 					// Dataview race condition
 					this.timeProvider.setTimeout(() => {
