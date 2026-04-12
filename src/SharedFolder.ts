@@ -628,10 +628,18 @@ export class SharedFolder extends HasProvider {
 				// File doesn't exist on disk yet (new remote file) — create it
 				const normalized = normalizePath(vaultPath);
 				// Ensure parent folders exist
-				const parentPath = normalized.substring(0, normalized.lastIndexOf("/"));
-				if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
-					await this.vault.createFolder(parentPath);
-				}
+					const parentPath = normalized.substring(0, normalized.lastIndexOf("/"));
+					if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
+						try {
+							await this.vault.createFolder(parentPath);
+						} catch (_e) {
+							// Concurrent file writes may race to create the same parent folder.
+							// If the folder now exists (created by the other write), continue.
+							if (!this.vault.getAbstractFileByPath(parentPath)) {
+								throw _e;
+							}
+						}
+					}
 				tfile = await this.vault.create(normalized, contents);
 			}
 
@@ -2250,6 +2258,21 @@ export class SharedFolder extends HasProvider {
 	async resetHSMState(): Promise<void> {
 		await this._hsmStore.clearAllData();
 		this.mergeManager?.clearPersistedStateForFolder();
+	}
+
+	/**
+	 * Bulk-resolve all conflicted documents in this folder.
+	 *
+	 * @param side - 'local' = accept disk content for each conflict;
+	 *               'remote' = accept CRDT/server content for each conflict.
+	 * @returns Counts of resolved and failed documents.
+	 */
+	async bulkResolveConflicts(
+		side: 'local' | 'remote',
+	): Promise<{ resolved: number; failed: number }> {
+		if (!this.mergeManager) return { resolved: 0, failed: 0 };
+		const guids = Array.from(this.files.keys());
+		return this.mergeManager.resolveAllConflicts(guids, side);
 	}
 
 	destroy() {

@@ -735,6 +735,32 @@ export default class Live extends Plugin {
 										folder.netSync();
 									});
 							});
+							menu.addItem((item) => {
+								item
+									.setTitle("Relay: Accept Local for All Conflicts")
+									.setIcon("check-circle")
+									.onClick(async () => {
+										const result = await folder.bulkResolveConflicts('local');
+										if (result.resolved > 0 || result.failed > 0) {
+											new Notice(`Resolved ${result.resolved} conflict(s) accepting local.${result.failed ? ` ${result.failed} failed.` : ''}`);
+										} else {
+											new Notice("No conflicts found in this folder.");
+										}
+									});
+							});
+							menu.addItem((item) => {
+								item
+									.setTitle("Relay: Accept Remote for All Conflicts")
+									.setIcon("cloud-download")
+									.onClick(async () => {
+										const result = await folder.bulkResolveConflicts('remote');
+										if (result.resolved > 0 || result.failed > 0) {
+											new Notice(`Resolved ${result.resolved} conflict(s) accepting remote.${result.failed ? ` ${result.failed} failed.` : ''}`);
+										} else {
+											new Notice("No conflicts found in this folder.");
+										}
+									});
+							});
 						}
 					} else if (file instanceof TFile) {
 						const folder = this.sharedFolders.lookup(file.path);
@@ -1390,6 +1416,14 @@ export default class Live extends Plugin {
 	}
 
 	onunload() {
+		// Clear Yjs import guard so hot-reload doesn't falsely warn "Yjs was already imported".
+		// The flag ('__ $YJS$ __') is set at module-evaluation time by yjs/src/index.js.
+		// When Hot Reload re-evaluates main.js, yjs runs its init again and finds the stale
+		// flag — producing a false error. Clearing it here allows clean re-registration.
+		// This is safe: no other plugin bundles yjs, so there is only one true instance.
+		const _glo: any = typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : global);
+		delete _glo['__ $YJS$ __'];
+
 		// Clean up debug API globals
 		this.relayDebugAPI?.destroy();
 		this.relayDebugAPI = null as any;

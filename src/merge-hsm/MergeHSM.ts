@@ -446,6 +446,76 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 		return this.conflictData;
 	}
 
+	/**
+	 * Whether this HSM has a deferred (persisted) conflict record.
+	 * True means the last session ended in an unresolved conflict state.
+	 */
+	get hasDeferredConflict(): boolean {
+		return this._deferredConflict !== undefined;
+	}
+
+	/**
+	 * Bulk-resolve: accept disk content as the winner.
+	 * Reads current disk via diskLoader, applies it to the CRDT,
+	 * sets a new LCA, and clears any deferred conflict record.
+	 * Safe to call from idle or active-conflict states.
+	 * @returns true on success, false if disk or CRDT not available.
+	 */
+	async forceAcceptLocal(): Promise<boolean> {
+		if (!this.localDoc) return false;
+		const diskContent = await this._diskLoader();
+		if (!diskContent) return false;
+
+		// Apply disk content to CRDT (DMP-based, preserves CRDT history)
+		this.applyContentToLocalDoc(diskContent.content);
+
+		// Compute hash and set new LCA anchored to disk state
+		const hash = await this.hashFn(diskContent.content);
+		const stateVector = Y.encodeStateVector(this.localDoc);
+		this._lca = {
+			contents: diskContent.content,
+			meta: { hash, mtime: diskContent.mtime },
+			stateVector,
+		};
+		this._localStateVector = stateVector;
+		this._disk = { hash, mtime: diskContent.mtime };
+		this._deferredConflict = undefined;
+		this.conflictData = null;
+		this.emitPersistState();
+		return true;
+	}
+
+	/**
+	 * Bulk-resolve: accept CRDT (remote) content as the winner.
+	 * Emits WRITE_DISK to overwrite disk with the current CRDT content,
+	 * sets a new LCA, and clears any deferred conflict record.
+	 * Safe to call from idle or active-conflict states.
+	 * @returns true on success, false if CRDT not available.
+	 */
+	async forceAcceptRemote(): Promise<boolean> {
+		if (!this.localDoc) return false;
+		const crdt = this.localDoc.getText("contents").toString();
+
+		// Emit WRITE_DISK — handled by DiskIntegration / SharedFolder
+		this.emitEffect({ type: "WRITE_DISK", guid: this._guid, contents: crdt });
+
+		// Compute hash and set LCA anchored to CRDT state
+		const hash = await this.hashFn(crdt);
+		const mtime = this.timeProvider.now();
+		const stateVector = Y.encodeStateVector(this.localDoc);
+		this._lca = {
+			contents: crdt,
+			meta: { hash, mtime },
+			stateVector,
+		};
+		this._localStateVector = stateVector;
+		this._disk = { hash, mtime };
+		this._deferredConflict = undefined;
+		this.conflictData = null;
+		this.emitPersistState();
+		return true;
+	}
+
 	getRemoteDoc(): Y.Doc | null {
 		return this.remoteDoc;
 	}

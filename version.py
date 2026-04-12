@@ -1,9 +1,9 @@
 import os
 import json
 import click
-import git
+import git  # type: ignore
 import time
-from github import Github
+from github import Github  # type: ignore
 
 REMOTE = os.environ.get("ORIGIN", "origin")
 

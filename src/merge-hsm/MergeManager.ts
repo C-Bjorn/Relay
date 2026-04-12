@@ -1029,6 +1029,58 @@ export class MergeManager {
   }
 
   /**
+   * Bulk-resolve all conflicted HSMs in the given guid set.
+   *
+   * For active HSMs in `active.conflict.*`: sends RESOLVE synchronously.
+   * For idle/hibernated HSMs with a deferred or in-memory conflict:
+   *   calls forceAcceptLocal() or forceAcceptRemote().
+   *
+   * @param guids - Set of document GUIDs to check (typically all guids in the folder).
+   * @param side  - 'local' = accept disk content; 'remote' = accept CRDT content.
+   * @returns Counts of resolved and failed documents.
+   */
+  async resolveAllConflicts(
+    guids: string[],
+    side: 'local' | 'remote',
+  ): Promise<{ resolved: number; failed: number }> {
+    let resolved = 0;
+    let failed = 0;
+
+    for (const guid of guids) {
+      const hsm = this.getHSMForGuid(guid);
+      if (!hsm) continue;
+
+      const conflictData = hsm.getConflictData();
+      const hasDeferredConflict = hsm.hasDeferredConflict;
+      const isActiveConflict = hsm.state.statePath.startsWith('active.conflict.');
+
+      // Skip if no conflict at all
+      if (!conflictData && !hasDeferredConflict) continue;
+
+      try {
+        if (isActiveConflict && conflictData) {
+          // File is open in the editor showing the conflict banner
+          const contents = side === 'local' ? conflictData.theirs : conflictData.ours;
+          hsm.send({ type: 'RESOLVE', contents });
+          resolved++;
+        } else if (side === 'local') {
+          const ok = await hsm.forceAcceptLocal();
+          if (ok) resolved++;
+          else failed++;
+        } else {
+          const ok = await hsm.forceAcceptRemote();
+          if (ok) resolved++;
+          else failed++;
+        }
+      } catch (_err) {
+        failed++;
+      }
+    }
+
+    return { resolved, failed };
+  }
+
+  /**
    * Clear the in-memory LCA and state-vector caches for all registered documents.
    * Called by SharedFolder.resetHSMState() after wiping the HSMStore so that
    * re-opened HSMs start fresh without stale cached metadata.
