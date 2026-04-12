@@ -1,11 +1,11 @@
 {
-  "id": "system3-relay",
-  "name": "Relay",
-  "version": "0.8.0-rc3",
-  "minAppVersion": "0.15.0",
-  "description": "Collaborate in real time with live cursors. Create multiplayer folders and manage user access.",
-  "author": "System 3",
-  "authorUrl": "https://system3.md",
-  "fundingUrl": "https://www.buymeacoffee.com/dtkav",
-  "isDesktopOnly": false
+    "id":  "system3-relay",
+    "name":  "Relay",
+    "version":  "0.8.0-rc4",
+    "minAppVersion":  "0.15.0",
+    "description":  "Collaborate in real time with live cursors. Create multiplayer folders and manage user access.",
+    "author":  "System 3",
+    "authorUrl":  "https://system3.md",
+    "fundingUrl":  "https://www.buymeacoffee.com/dtkav",
+    "isDesktopOnly":  false
 }
