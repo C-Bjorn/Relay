@@ -1029,55 +1029,82 @@ export class MergeManager {
   }
 
   /**
-   * Bulk-resolve all conflicted HSMs in the given guid set.
+   * Bulk-resolve all HSMs in the given guid set.
    *
-   * For active HSMs in `active.conflict.*`: sends RESOLVE synchronously.
-   * For idle/hibernated HSMs with a deferred or in-memory conflict:
-   *   calls forceAcceptLocal() or forceAcceptRemote().
+   * Processes ALL registered documents (not just ones with a flagged conflict),
+   * because idle files may be genuinely diverged (CRDT ≠ disk) without having
+   * gone through the active conflict detection path yet.
    *
-   * @param guids - Set of document GUIDs to check (typically all guids in the folder).
-   * @param side  - 'local' = accept disk content; 'remote' = accept CRDT content.
-   * @returns Counts of resolved and failed documents.
+   * - Hibernated files (localDoc evicted from memory) are counted as `skipped`
+   *   and logged so the user knows which ones need manual opening.
+   * - Active-conflict files (editor open, banner shown): sends RESOLVE directly.
+   * - All other warm/cached files: calls forceAcceptLocal/Remote, which is a
+   *   no-op if CRDT already matches disk.
+   *
+   * @param guids - GUIDs to process (typically all guids in the folder).
+   * @param side  - 'local' = disk wins; 'remote' = CRDT wins.
+   * @returns Counts of resolved, skipped (hibernated), and failed documents.
    */
   async resolveAllConflicts(
     guids: string[],
     side: 'local' | 'remote',
-  ): Promise<{ resolved: number; failed: number }> {
+  ): Promise<{ resolved: number; skipped: number; failed: number }> {
     let resolved = 0;
+    let skipped = 0;
     let failed = 0;
+    const t0 = Date.now();
 
     for (const guid of guids) {
       const hsm = this.getHSMForGuid(guid);
       if (!hsm) continue;
 
-      const conflictData = hsm.getConflictData();
-      const hasDeferredConflict = hsm.hasDeferredConflict;
-      const isActiveConflict = hsm.state.statePath.startsWith('active.conflict.');
+      // Hibernated = YDocs have been evicted from memory; forceAccept* would fail.
+      // Report these separately so the user knows to open them manually.
+      const hibernationState = this.getHibernationState(guid);
+      if (hibernationState === 'hibernated') {
+        skipped++;
+        console.warn(`[Relay] resolveAllConflicts: skipped hibernated doc: ${hsm.path}`);
+        continue;
+      }
 
-      // Skip if no conflict at all
-      if (!conflictData && !hasDeferredConflict) continue;
+      const conflictData = hsm.getConflictData();
+      const isActiveConflict = hsm.state.statePath.startsWith('active.conflict.');
 
       try {
         if (isActiveConflict && conflictData) {
-          // File is open in the editor showing the conflict banner
+          // File is open in the editor showing the conflict banner — resolve directly
           const contents = side === 'local' ? conflictData.theirs : conflictData.ours;
           hsm.send({ type: 'RESOLVE', contents });
           resolved++;
         } else if (side === 'local') {
+          // For all warm/cached files: apply disk → CRDT (no-op if already equal)
           const ok = await hsm.forceAcceptLocal();
-          if (ok) resolved++;
-          else failed++;
+          if (ok) {
+            resolved++;
+          } else {
+            failed++;
+            console.warn(`[Relay] resolveAllConflicts: forceAcceptLocal failed for: ${hsm.path}`);
+          }
         } else {
+          // For all warm/cached files: apply CRDT → disk (no-op if already equal)
           const ok = await hsm.forceAcceptRemote();
-          if (ok) resolved++;
-          else failed++;
+          if (ok) {
+            resolved++;
+          } else {
+            failed++;
+            console.warn(`[Relay] resolveAllConflicts: forceAcceptRemote failed for: ${hsm.path}`);
+          }
         }
-      } catch (_err) {
+      } catch (err) {
         failed++;
+        console.error(`[Relay] resolveAllConflicts: exception for ${hsm.path}:`, err);
       }
     }
 
-    return { resolved, failed };
+    console.log(
+      `[Relay] resolveAllConflicts(${side}): resolved=${resolved} skipped=${skipped} failed=${failed} in ${Date.now() - t0}ms`,
+    );
+    return { resolved, skipped, failed };
   }
 
   /**

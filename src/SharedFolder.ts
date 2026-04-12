@@ -2269,8 +2269,8 @@ export class SharedFolder extends HasProvider {
 	 */
 	async bulkResolveConflicts(
 		side: 'local' | 'remote',
-	): Promise<{ resolved: number; failed: number }> {
-		if (!this.mergeManager) return { resolved: 0, failed: 0 };
+	): Promise<{ resolved: number; skipped: number; failed: number }> {
+		if (!this.mergeManager) return { resolved: 0, skipped: 0, failed: 0 };
 		const guids = Array.from(this.files.keys());
 		return this.mergeManager.resolveAllConflicts(guids, side);
 	}

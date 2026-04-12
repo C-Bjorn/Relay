@@ -740,12 +740,14 @@ export default class Live extends Plugin {
 									.setTitle("Relay: Accept Local for All Conflicts")
 									.setIcon("check-circle")
 									.onClick(async () => {
+										const t0 = Date.now();
 										const result = await folder.bulkResolveConflicts('local');
-										if (result.resolved > 0 || result.failed > 0) {
-											new Notice(`Resolved ${result.resolved} conflict(s) accepting local.${result.failed ? ` ${result.failed} failed.` : ''}`);
-										} else {
-											new Notice("No conflicts found in this folder.");
-										}
+										const ms = Date.now() - t0;
+										console.log(`[Relay] Accept Local: resolved=${result.resolved} skipped=${result.skipped} failed=${result.failed} in ${ms}ms`);
+										const parts: string[] = [`Processed ${result.resolved} file(s) — accepted local.`];
+										if (result.skipped) parts.push(`${result.skipped} hibernated (open manually).`);
+										if (result.failed) parts.push(`${result.failed} failed — see console.`);
+										new Notice(parts.join(' '));
 									});
 							});
 							menu.addItem((item) => {
@@ -753,12 +755,14 @@ export default class Live extends Plugin {
 									.setTitle("Relay: Accept Remote for All Conflicts")
 									.setIcon("cloud-download")
 									.onClick(async () => {
+										const t0 = Date.now();
 										const result = await folder.bulkResolveConflicts('remote');
-										if (result.resolved > 0 || result.failed > 0) {
-											new Notice(`Resolved ${result.resolved} conflict(s) accepting remote.${result.failed ? ` ${result.failed} failed.` : ''}`);
-										} else {
-											new Notice("No conflicts found in this folder.");
-										}
+										const ms = Date.now() - t0;
+										console.log(`[Relay] Accept Remote: resolved=${result.resolved} skipped=${result.skipped} failed=${result.failed} in ${ms}ms`);
+										const parts: string[] = [`Processed ${result.resolved} file(s) — accepted remote.`];
+										if (result.skipped) parts.push(`${result.skipped} hibernated (open manually).`);
+										if (result.failed) parts.push(`${result.failed} failed — see console.`);
+										new Notice(parts.join(' '));
 									});
 							});
 						}
