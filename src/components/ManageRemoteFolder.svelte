@@ -12,7 +12,7 @@
 	import { SharedFolders, type SharedFolder } from "src/SharedFolder";
 	import { debounce, Notice } from "obsidian";
 	import { createEventDispatcher, onMount } from "svelte";
-	import { derived, writable } from "svelte/store";
+	import { derived, writable, get } from "svelte/store";
 	import type { ObservableMap } from "src/observable/ObservableMap";
 	import Breadcrumbs from "./Breadcrumbs.svelte";
 	import AccountSettingItem from "./AccountSettingItem.svelte";
@@ -131,8 +131,9 @@
 	let autoResolve: AutoResolve = $folderStore?.autoResolveConflicts ?? 'none';
 
 	function onAutoResolveChange() {
-		if ($folderStore) {
-			$folderStore.autoResolveConflicts = autoResolve;
+		const folder = get(folderStore);
+		if (folder) {
+			folder.autoResolveConflicts = autoResolve;
 		}
 	}
 
@@ -140,8 +141,9 @@
 	let diskDebounceMs: number = $folderStore?.diskWriteDebounceMs ?? 1000;
 
 	function onDiskDebounceChange() {
-		if ($folderStore) {
-			$folderStore.diskWriteDebounceMs = diskDebounceMs;
+		const folder = get(folderStore);
+		if (folder) {
+			folder.diskWriteDebounceMs = diskDebounceMs;
 		}
 	}
 
@@ -249,7 +251,7 @@
 		try {
 			await plugin.relayManager.deleteRemote(remoteFolder);
 			if ($folderStore) {
-				$folderStore.remote = undefined;
+				get(folderStore)!.remote = undefined;
 				plugin.sharedFolders.notifyListeners();
 				dispatch("manageSharedFolder", { folder: $folderStore });
 				return;

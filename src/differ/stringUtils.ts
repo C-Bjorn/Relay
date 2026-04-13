@@ -5,7 +5,14 @@ export function insertLine(args: {
 	position: number;
 }): string {
 	const lines = args.fullText.split("\n");
-	lines.splice(args.position, 0, args.newLine);
+	// Split newLine so embedded '\n' chars don't double up when joined.
+	// Strip a trailing empty string — artifact of '\n'-terminated content that
+	// was processed through updateState's .concat("\n").split("\n") normalization.
+	const newLines = args.newLine.split("\n");
+	if (newLines.length > 1 && newLines[newLines.length - 1] === "") {
+		newLines.pop();
+	}
+	lines.splice(args.position, 0, ...newLines);
 	return lines.join("\n");
 }
 
@@ -20,7 +27,12 @@ export function replaceLine(args: {
 	if (args.newLine === "") {
 		lines.splice(args.position, args.linesToReplace);
 	} else {
-		lines.splice(args.position, args.linesToReplace, args.newLine);
+		// Same split-and-strip logic as insertLine to avoid double '\n'.
+		const newLines = args.newLine.split("\n");
+		if (newLines.length > 1 && newLines[newLines.length - 1] === "") {
+			newLines.pop();
+		}
+		lines.splice(args.position, args.linesToReplace, ...newLines);
 	}
 	return lines.join("\n");
 }

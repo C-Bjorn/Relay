@@ -70,7 +70,7 @@ export async function openDiffView(
 
 	// Opens a new leaf (view) of the type VIEW_TYPE_DIFFERENCES
 	const leaf = workspace.getLeaf(true);
-	leaf.setViewState({
+	await leaf.setViewState({
 		type: VIEW_TYPE_DIFFERENCES,
 		active: true,
 		state,

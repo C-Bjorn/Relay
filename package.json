@@ -5,6 +5,7 @@
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs watch \"E:/GIT/LOCAL/obsidian-graphiti-mcp/test-vault/.obsidian/plugins/system3-relay\"",
+		"bjorn": "node esbuild.config.mjs watch \"E:/ObsidianVault/Bjorn/.obsidian/plugins/system3-relay\"",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs staging",
 		"staging": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs staging --watch",
 		"beta": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs debug",

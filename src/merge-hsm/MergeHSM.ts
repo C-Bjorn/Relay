@@ -2425,14 +2425,16 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	): string | null {
 		if (mode === 'remote') return remoteContent;
 		if (mode === 'local') return diskContent;
-		// 'latest': compare disk mtime vs remote receive time
+		// 'latest': compare disk mtime vs remote receive time.
+		// Disk wins on tie (prefer external tool's explicit write over CRDT).
+		// When _disk is null (e.g. active.entering before first DISK_CHANGED in this
+		// session) diskMtime is 0. remoteMtime is also 0 if no REMOTE_UPDATE has
+		// arrived yet. In that case 0 >= 0 = true → disk wins, which is correct:
+		// the disk content was just read and IS the most current version.
+		// Do NOT add a "both zero → return null" guard here — it breaks 'latest'
+		// mode in every active-entering conflict (the primary MegaMem use case).
 		const diskMtime = diskMtimeOverride ?? this._disk?.mtime ?? 0;
 		const remoteMtime = this._remoteMtime ?? 0;
-		if (diskMtime === 0 && remoteMtime === 0) {
-			// No timestamps available — caller must fall through to conflict UI
-			return null;
-		}
-		// Disk wins on tie (prefer external tool's explicit write)
 		return diskMtime >= remoteMtime ? diskContent : remoteContent;
 	}
 
