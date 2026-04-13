@@ -68,6 +68,12 @@ export interface TestHSMOptions {
    * Use for replay-based testing where recorded events drive transitions.
    */
   replayMode?: boolean;
+
+  /**
+   * Per-folder conflict auto-resolve preference for testing.
+   * Default: () => 'none' (show conflict UI, no automatic resolution).
+   */
+  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
 }
 
 export interface TestHSM {
@@ -353,6 +359,7 @@ export async function createTestHSM(options: TestHSMOptions = {}): Promise<TestH
     diskLoader,
     isProviderSynced: () => providerState.synced,
     replayMode: options.replayMode,
+    getAutoResolveConflicts: options.getAutoResolveConflicts,
     yaml: {
       parse: (raw: string) => jsyaml.load(raw, { schema: jsyaml.JSON_SCHEMA }) as any,
       stringify: (obj: any) => jsyaml.dump(obj, { schema: jsyaml.JSON_SCHEMA, flowLevel: -1, lineWidth: -1 }),

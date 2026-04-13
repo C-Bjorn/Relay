@@ -56,8 +56,8 @@
 		return $roles.values().sort(rolePrioritySort);
 	});
 
-	function rolePrioritySort(a: { name: Role }, b: { name: Role }) {
-		const priority: Record<Role, number> = { Owner: 0, Member: 1, Reader: 2 };
+	function rolePrioritySort(a: { name: string }, b: { name: string }) {
+		const priority: Record<string, number> = { Owner: 0, Member: 1, Reader: 2 };
 		return (priority[a.name] ?? 999) - (priority[b.name] ?? 999);
 	}
 
@@ -126,13 +126,22 @@
 	let syncSettings: SyncSettingsManager | undefined =
 		$folderStore?.syncSettingsManager;
 
-	// ── Fix 4: per-folder auto-resolve setting ─────────────────────────────
-	type AutoResolve = 'none' | 'remote' | 'local';
+	// ── per-folder auto-resolve setting ────────────────────────────────────
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest';
 	let autoResolve: AutoResolve = $folderStore?.autoResolveConflicts ?? 'none';
 
 	function onAutoResolveChange() {
 		if ($folderStore) {
 			$folderStore.autoResolveConflicts = autoResolve;
+		}
+	}
+
+	// ── disk write debounce setting ─────────────────────────────────────────
+	let diskDebounceMs: number = $folderStore?.diskWriteDebounceMs ?? 1000;
+
+	function onDiskDebounceChange() {
+		if ($folderStore) {
+			$folderStore.diskWriteDebounceMs = diskDebounceMs;
 		}
 	}
 
@@ -316,9 +325,11 @@
 
 	async function handleFolderRoleChangeEvent(event: Event) {
 		const target = event.target as HTMLSelectElement;
-		const folderRole = $virtualFolderRoles.find(
+		const found = $virtualFolderRoles.find(
 			(role) => role.id === target.dataset.roleId!,
 		);
+		// Only FolderRole objects can be changed via this handler
+		const folderRole = (found && 'sharedFolderId' in found) ? found as FolderRole : null;
 		if (folderRole) {
 			const originalRole = folderRole.role;
 			try {
@@ -393,7 +404,7 @@
 		} catch (error) {
 			errorLog("Failed to update folder name:", error);
 			// If it's a 400 error, mark the name as invalid
-			if (error?.status === 400) {
+			if ((error as any)?.status === 400) {
 				nameValid.set(false);
 			}
 			updating.set(false);
@@ -616,12 +627,25 @@
 	<SettingGroup>
 		<SettingItem
 			name="Auto-resolve conflicts"
-			description="When an external write (MegaMem, Claude Code) conflicts with a live editor — which version wins automatically?"
+			description="When a conflict is detected — which version wins automatically? 'Prefer Latest' accepts whichever side was modified most recently."
 		>
 			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
 				<option value="none">Manual — show conflict UI</option>
 				<option value="remote">Prefer Remote — accept server/editor state</option>
 				<option value="local">Prefer Local — accept external writes</option>
+				<option value="latest">Prefer Latest — accept most recent</option>
+			</select>
+		</SettingItem>
+		<SettingItem
+			name="Disk write delay"
+			description="Quiet period after a file is written before Relay syncs it. Increase for folders written by external tools (MegaMem, Claude Code) to absorb rapid write chains. Default: 1 second."
+		>
+			<select bind:value={diskDebounceMs} on:change={onDiskDebounceChange}>
+				<option value={0}>Off — sync immediately</option>
+				<option value={500}>Fast — 0.5 seconds</option>
+				<option value={1000}>Standard — 1 second (default)</option>
+				<option value={3000}>Relaxed — 3 seconds</option>
+				<option value={30000}>Slow — 30 seconds</option>
 			</select>
 		</SettingItem>
 	</SettingGroup>

@@ -13,14 +13,23 @@
 
 	const dispatch = createEventDispatcher();
 
-	// ── Fix 4: per-folder auto-resolve setting ──────────────────────────────
-	type AutoResolve = 'none' | 'remote' | 'local';
+	// ── per-folder auto-resolve setting ─────────────────────────────────────
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest';
 
 	let autoResolve: AutoResolve = sharedFolder?.autoResolveConflicts ?? 'none';
 
 	function onAutoResolveChange() {
 		if (sharedFolder) {
 			sharedFolder.autoResolveConflicts = autoResolve;
+		}
+	}
+
+	// ── disk write debounce setting ──────────────────────────────────────────
+	let diskDebounceMs: number = sharedFolder?.diskWriteDebounceMs ?? 1000;
+
+	function onDiskDebounceChange() {
+		if (sharedFolder) {
+			sharedFolder.diskWriteDebounceMs = diskDebounceMs;
 		}
 	}
 
@@ -79,17 +88,30 @@
 </div>
 
 {#if sharedFolder}
-	<!-- Fix 4: Conflict resolution preference -->
+	<!-- Conflict resolution + disk write settings -->
 	<SettingItemHeading name="Sync settings"></SettingItemHeading>
 	<SettingGroup>
 		<SettingItem
 			name="Conflict resolution"
-			description="When a conflict is detected between an external write (MegaMem, Claude Code) and the live editor, how should Relay resolve it?"
+			description="When a conflict is detected — which version wins automatically? 'Prefer Latest' accepts whichever side was modified most recently."
 		>
 			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
 				<option value="none">Manual — show conflict UI</option>
 				<option value="remote">Prefer Remote — always accept server/editor state</option>
 				<option value="local">Prefer Local — always accept disk/external writes</option>
+				<option value="latest">Prefer Latest — accept most recent</option>
+			</select>
+		</SettingItem>
+		<SettingItem
+			name="Disk write delay"
+			description="Quiet period after a file is written before Relay syncs it. Increase for folders written by external tools (MegaMem, Claude Code) to absorb rapid write chains. Default: 1 second."
+		>
+			<select bind:value={diskDebounceMs} on:change={onDiskDebounceChange}>
+				<option value={0}>Off — sync immediately</option>
+				<option value={500}>Fast — 0.5 seconds</option>
+				<option value={1000}>Standard — 1 second (default)</option>
+				<option value={3000}>Relaxed — 3 seconds</option>
+				<option value={30000}>Slow — 30 seconds</option>
 			</select>
 		</SettingItem>
 	</SettingGroup>

@@ -186,8 +186,14 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	// Last known editor text (for drift detection)
 	private lastKnownEditorText: string | null = null;
 
-	// Per-folder conflict auto-resolve preference callback (Fix 4)
-	private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local';
+	// Per-folder conflict auto-resolve preference callback
+	private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest';
+
+	// Wall-clock timestamp of the most recently received remote CRDT update (ms since epoch).
+	// Used by 'latest' auto-resolve mode to compare against disk mtime.
+	// Records local receive time — a proxy for "when was the remote edit made".
+	// null until the first REMOTE_UPDATE arrives after construction.
+	private _remoteMtime: number | null = null;
 
 	// Y.Text observer for converting remote deltas to positioned changes
 	private localTextObserver:
@@ -1163,6 +1169,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 				} else {
 					this.pendingIdleUpdates = update;
 				}
+				// Record receive time for 'latest' auto-resolve timestamp comparison
+				this._remoteMtime = this.timeProvider.now();
 			},
 			storeDiskMetadata: (_hsm, event) => {
 				const e = event as any;
@@ -1718,14 +1726,41 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 					this._fork = null;
 					this._ingestionTexts = [];
 					this._bridge.resetPendingCounters();
-
+	
 					// Drop captured disk ops — conflict resolution supersedes them.
 					const opCapture = this.getOpCapture();
 					if (opCapture && fork.captureMark != null) {
 						const diskOps = opCapture.sinceByOrigin(fork.captureMark, DISK_ORIGIN);
 						opCapture.drop(diskOps);
 					}
-
+	
+					// Check auto-resolve preference before surfacing conflict UI.
+					// In fork-reconcile: localContent = disk-ingested, remoteContent = CRDT.
+					// Use fork.created as disk mtime proxy (timestamp when disk edit was ingested).
+					const forkAutoResolve = this._getAutoResolveConflicts();
+					if (forkAutoResolve !== 'none') {
+						const chosen = this.pickAutoResolveContent(
+							forkAutoResolve, remoteContent, localContent, fork.created
+						);
+						if (chosen !== null) {
+							this.applyContentToLocalDoc(chosen);
+							this._bridge.flushOutbound();
+							const editorPatches = computeDiffMatchPatchChanges(localContent, chosen);
+							if (editorPatches.length > 0) {
+								this.emitEffect({ type: "DISPATCH_CM6", changes: editorPatches });
+							}
+							this.send({
+								type: "MERGE_SUCCESS",
+								newLCA: this._lca ?? {
+									contents: "",
+									meta: { hash: "", mtime: 0 },
+									stateVector: new Uint8Array([0]),
+								},
+							});
+							return;
+						}
+					}
+	
 					this.send({
 						type: "MERGE_CONFLICT",
 						base: fork.base,
@@ -2025,6 +2060,14 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 				// Silently accept the disk/external write and push it to the server.
 				if (signal.aborted) return { success: false };
 				return { success: true, mergedContent: diskContent, needsSync: true };
+			} else if (autoResolve === 'latest') {
+				// Accept whichever side has the more recent modification timestamp.
+				const chosen = this.pickAutoResolveContent('latest', crdtContent, diskContent);
+				if (chosen !== null) {
+					if (signal.aborted) return { success: false };
+					return { success: true, mergedContent: chosen, needsSync: chosen === diskContent };
+				}
+				// chosen === null: timestamps unavailable — fall through to fork/conflict UI
 			}
 			// When LCA exists, create a fork so fork-reconcile can attempt
 			// resolution once the provider syncs with authoritative remote state.
@@ -2177,7 +2220,51 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 			};
 		}
 
-		// Merge conflict — can't auto-resolve.
+		// Merge conflict — check auto-resolve preference before storing conflictData.
+		// localContent = disk-ingested (Local), remoteContent = CRDT (Remote).
+		const idleForkAutoResolve = this._getAutoResolveConflicts();
+		if (idleForkAutoResolve !== 'none') {
+			const chosen = this.pickAutoResolveContent(
+				idleForkAutoResolve, remoteContent, localContent, fork.created
+			);
+			if (chosen !== null) {
+				// Drop captured disk ops (same as successful merge path)
+				const opCaptureAR = this.getOpCapture();
+				const diskOpsAR = (opCaptureAR && fork.captureMark != null)
+					? opCaptureAR.sinceByOrigin(fork.captureMark, DISK_ORIGIN)
+					: [];
+				if (diskOpsAR.length > 0) opCaptureAR!.cancel(diskOpsAR);
+				this._ingestionTexts = [];
+
+				// Merge remoteDoc into localDoc so CRDT histories share item IDs
+				const remoteUpdateAR = Y.encodeStateAsUpdate(
+					this.remoteDoc, Y.encodeStateVector(this.localDoc)
+				);
+				this._bridge.syncToLocal(remoteUpdateAR);
+
+				this.applyContentToLocalDoc(chosen);
+				const stateVectorAR = Y.encodeStateVector(this.localDoc);
+				const updateAR = Y.encodeStateAsUpdate(this.localDoc);
+				const hashAR = await this.hashFn(chosen);
+				if (signal.aborted) return { success: false };
+
+				// Write chosen to disk only when CRDT wins (disk needs updating)
+				if (chosen !== localContent) {
+					this.emitEffect({ type: "WRITE_DISK", guid: this._guid, contents: chosen });
+				}
+				this._bridge.syncToRemote(updateAR);
+
+				return {
+					success: true,
+					newLCA: {
+						contents: chosen,
+						meta: { hash: hashAR, mtime: this.timeProvider.now() },
+						stateVector: stateVectorAR,
+					},
+				};
+			}
+		}
+
 		// Populate conflictData so the diff UI is available when the user opens
 		// the file from idle.diverged. Without this, CRDT merge during provider
 		// sync would make localDoc and disk identical, causing the active.entering
@@ -2320,6 +2407,36 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	}
 
 	/**
+	 * Pick the auto-resolve winner based on the configured mode.
+	 *
+	 * @param mode  - The auto-resolve mode ('remote', 'local', or 'latest')
+	 * @param remoteContent - CRDT / server content (ours / Remote side)
+	 * @param diskContent   - Disk / external-tool content (theirs / Local side)
+	 * @param diskMtimeOverride - Optional disk mtime to use instead of this._disk?.mtime.
+	 *   Pass this._fork?.created in fork-reconcile paths where this._disk may lag.
+	 * @returns The chosen content string, or null if 'latest' but timestamps are unavailable
+	 *   (caller should fall through to conflict UI in that case).
+	 */
+	private pickAutoResolveContent(
+		mode: 'remote' | 'local' | 'latest',
+		remoteContent: string,
+		diskContent: string,
+		diskMtimeOverride?: number,
+	): string | null {
+		if (mode === 'remote') return remoteContent;
+		if (mode === 'local') return diskContent;
+		// 'latest': compare disk mtime vs remote receive time
+		const diskMtime = diskMtimeOverride ?? this._disk?.mtime ?? 0;
+		const remoteMtime = this._remoteMtime ?? 0;
+		if (diskMtime === 0 && remoteMtime === 0) {
+			// No timestamps available — caller must fall through to conflict UI
+			return null;
+		}
+		// Disk wins on tie (prefer external tool's explicit write)
+		return diskMtime >= remoteMtime ? diskContent : remoteContent;
+	}
+
+	/**
 	 * Perform two-way merge when no LCA is available.
 	 * If both sides match, resolves immediately. Otherwise shows diff UI.
 	 */
@@ -2327,6 +2444,30 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 		if (localText === diskText) {
 			this.send({ type: "RESOLVE", contents: localText });
 			return;
+		}
+
+		// Check auto-resolve preference before showing conflict UI.
+		// localText = CRDT/Remote side; diskText = editor/disk/Local side.
+		const twoWayAutoResolve = this._getAutoResolveConflicts();
+		if (twoWayAutoResolve !== 'none') {
+			const chosen = this.pickAutoResolveContent(twoWayAutoResolve, localText, diskText);
+			if (chosen !== null) {
+				this.applyContentToLocalDoc(chosen);
+				this._bridge.flushOutbound();
+				const editorPatches = computeDiffMatchPatchChanges(diskText, chosen);
+				if (editorPatches.length > 0) {
+					this.emitEffect({ type: "DISPATCH_CM6", changes: editorPatches });
+				}
+				this.send({
+					type: "MERGE_SUCCESS",
+					newLCA: this._lca ?? {
+						contents: "",
+						meta: { hash: "", mtime: 0 },
+						stateVector: new Uint8Array([0]),
+					},
+				});
+				return;
+			}
 		}
 
 		// Populate conflictData for the diff UI
@@ -2399,6 +2540,31 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 			// by the mergeRemoteToLocal entry action on active.tracking.
 			this.pendingEditorContent = null;
 		} else {
+			// Check auto-resolve preference before showing conflict UI.
+			// localText = CRDT/Remote side; diskText = editor/disk/Local side.
+			const threeWayAutoResolve = this._getAutoResolveConflicts();
+			if (threeWayAutoResolve !== 'none') {
+				const chosen = this.pickAutoResolveContent(threeWayAutoResolve, localText, diskText);
+				if (chosen !== null) {
+					this.applyContentToLocalDoc(chosen);
+					this._bridge.flushOutbound();
+					const editorPatches = computeDiffMatchPatchChanges(diskText, chosen);
+					if (editorPatches.length > 0) {
+						this.emitEffect({ type: "DISPATCH_CM6", changes: editorPatches });
+					}
+					this.pendingEditorContent = null;
+					this.send({
+						type: "MERGE_SUCCESS",
+						newLCA: this._lca ?? {
+							contents: "",
+							meta: { hash: "", mtime: 0 },
+							stateVector: new Uint8Array([0]),
+						},
+					});
+					return;
+				}
+			}
+
 			// Merge has conflicts - populate conflictData for banner/diff view
 			this.conflictData = {
 				base: baseText,

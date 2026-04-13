@@ -826,10 +826,11 @@ export interface MergeHSMConfig {
 
 	/**
 	 * Callback to get the current per-folder auto-resolve preference.
-	 * Called at idle merge time so runtime setting changes take effect immediately.
+	 * Called at merge time so runtime setting changes take effect immediately.
 	 * Defaults to () => 'none' (show conflict UI, no automatic resolution).
+	 * 'latest' picks whichever side has the more recent modification timestamp.
 	 */
-	getAutoResolveConflicts?: () => 'none' | 'remote' | 'local';
+	getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
 }
 
 // =============================================================================

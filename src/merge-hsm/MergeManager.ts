@@ -139,8 +139,9 @@ export interface MergeManagerConfig {
    * Callback to get the current per-folder auto-resolve preference.
    * Called at merge time so runtime setting changes take effect immediately.
    * Defaults to () => 'none' (manual resolution).
+   * 'latest' picks whichever side has the more recent modification timestamp.
    */
-  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local';
+  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
 }
 
 export interface PollOptions {
@@ -277,7 +278,7 @@ export class MergeManager {
   private userId?: string;
   private _yaml: { parse: (yaml: string) => any; stringify: (obj: any) => string } | null = null;
   private _onTransition?: (guid: string, path: string, info: { from: import('./types').StatePath; to: import('./types').StatePath; event: import('./types').MergeEvent; effects: import('./types').MergeEffect[] }) => void;
-  private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local';
+  private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest';
 
   constructor(config: MergeManagerConfig) {
     this._getVaultId = config.getVaultId;

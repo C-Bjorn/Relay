@@ -75,7 +75,13 @@ export interface SharedFolderSettings {
 	localOnly?: boolean;
 	sync?: SyncFlags;
 	/** Per-folder conflict auto-resolution preference. Default: 'none' (show UI). */
-	autoResolveConflicts?: 'none' | 'remote' | 'local';
+	autoResolveConflicts?: 'none' | 'remote' | 'local' | 'latest';
+	/**
+	 * Quiet period (ms) after last vault.on("modify") for a file before dispatching DISK_CHANGED.
+	 * Absorbs rapid write chains (e.g. Templater → MegaMem) into a single DISK_CHANGED.
+	 * Default: 1000 (1 second). Set to 0 to disable (immediate dispatch, legacy behavior).
+	 */
+	diskWriteDebounceMs?: number;
 }
 
 interface Operation {
@@ -155,7 +161,8 @@ export class SharedFolder extends HasProvider {
 	_remote?: RemoteSharedFolder;
 	_shouldConnect: boolean;
 	private _localOnly: boolean;
-	private _autoResolveConflicts: 'none' | 'remote' | 'local' = 'none';
+	private _autoResolveConflicts: 'none' | 'remote' | 'local' | 'latest' = 'none';
+	private _diskWriteDebounceMs: number = 1000;
 	destroyed: boolean = false;
 	public vault: Vault;
 	syncStore: SyncStore;
@@ -227,6 +234,7 @@ export class SharedFolder extends HasProvider {
 		this._shouldConnect = this.settings.connect ?? true;
 		this._localOnly = this.settings.localOnly ?? false;
 		this._autoResolveConflicts = this.settings.autoResolveConflicts ?? 'none';
+		this._diskWriteDebounceMs = this.settings.diskWriteDebounceMs ?? 1000;
 
 		this.authoritative = authoritative;
 
@@ -848,16 +856,29 @@ export class SharedFolder extends HasProvider {
 		this.mergeManager?.setLocalOnly(guids, value);
 	}
 
-	public get autoResolveConflicts(): 'none' | 'remote' | 'local' {
+	public get autoResolveConflicts(): 'none' | 'remote' | 'local' | 'latest' {
 		return this._autoResolveConflicts;
 	}
 
-	public set autoResolveConflicts(value: 'none' | 'remote' | 'local') {
+	public set autoResolveConflicts(value: 'none' | 'remote' | 'local' | 'latest') {
 		if (this._autoResolveConflicts === value) return;
 		this._autoResolveConflicts = value;
 		this._settings.update((current) => ({
 			...current,
 			autoResolveConflicts: value,
+		}));
+	}
+
+	public get diskWriteDebounceMs(): number {
+		return this._diskWriteDebounceMs;
+	}
+
+	public set diskWriteDebounceMs(value: number) {
+		if (this._diskWriteDebounceMs === value) return;
+		this._diskWriteDebounceMs = value;
+		this._settings.update((current) => ({
+			...current,
+			diskWriteDebounceMs: value,
 		}));
 	}
 

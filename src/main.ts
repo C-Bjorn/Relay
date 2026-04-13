@@ -1086,6 +1086,12 @@ export default class Live extends Plugin {
 			}),
 		);
 
+		// Per-file debounce timers for DISK_CHANGED dispatch.
+		// Restarted on each vault.on("modify") for the same file path — only the
+		// final write within the quiet period sends DISK_CHANGED to the HSM.
+		// Absorbs rapid write chains (e.g. Templater → MegaMem) into one event.
+		const pendingDiskTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 		this.registerEvent(
 			this.app.vault.on("modify", async (tfile) => {
 				const folder = this.sharedFolders.lookup(tfile.path);
@@ -1095,62 +1101,76 @@ export default class Live extends Plugin {
 					if (file && isSyncFile(file)) {
 						file.sync();
 					}
-				// Send DISK_CHANGED to HSM for documents with active lock
-				// (but not when we're the ones doing the save).
-				// For files modified externally while closed (no HSM): the HSM
-				// architecture handles this via ACQUIRE_LOCK editorContent on open,
-				// which triggers a 3-way merge that auto-resolves "local-only" changes.
-				if (
-					file &&
-					isDocument(file) &&
-					file.hsm &&
-					!file.isSaving &&
-					tfile instanceof TFile
-				) {
-					try {
-						const contents = await this.app.vault.read(tfile);
-						const encoder = new TextEncoder();
-						const hash = await generateHash(encoder.encode(contents).buffer);
-						file.hsm.send({
-							type: 'DISK_CHANGED',
-							contents,
-							mtime: tfile.stat.mtime,
-							hash,
-						});
-					} catch (e) {
-						vaultLog("Failed to send DISK_CHANGED to HSM", e);
-					}
-				}
-	
-				// Sub-case B (Fix 1): file.hsm is null because the Document was created
-				// before MergeManager initialized (or ensureHSM() raced with the modify
-				// event). Reach into MergeManager to find a registered HSM by GUID and
-				// deliver DISK_CHANGED directly so external tool writes (MegaMem, etc.)
-				// are reflected in the CRDT without requiring a manual file open.
-				if (
-					file &&
-					isDocument(file) &&
-					!file.hsm &&
-					!file.isSaving &&
-					tfile instanceof TFile
-				) {
-					const hsm = folder.mergeManager?.getHSMForGuid(file.guid);
-					if (hsm) {
-						try {
-							const contents = await this.app.vault.read(tfile);
-							const encoder = new TextEncoder();
-							const hash = await generateHash(encoder.encode(contents).buffer);
-							hsm.send({
-								type: 'DISK_CHANGED',
-								contents,
-								mtime: tfile.stat.mtime,
-								hash,
-							});
-						} catch (e) {
-							vaultLog("Failed to send DISK_CHANGED to idle HSM", e);
+
+					// Helper: read the file and dispatch DISK_CHANGED to both
+					// sub-case A (HSM with active lock) and sub-case B (idle HSM lookup).
+					const dispatchDiskChanged = async () => {
+						// Sub-case A: file has an active HSM lock
+						if (
+							file &&
+							isDocument(file) &&
+							file.hsm &&
+							!file.isSaving &&
+							tfile instanceof TFile
+						) {
+							try {
+								const contents = await this.app.vault.read(tfile);
+								const encoder = new TextEncoder();
+								const hash = await generateHash(encoder.encode(contents).buffer);
+								file.hsm.send({
+									type: 'DISK_CHANGED',
+									contents,
+									mtime: tfile.stat.mtime,
+									hash,
+								});
+							} catch (e) {
+								vaultLog("Failed to send DISK_CHANGED to HSM", e);
+							}
 						}
+
+						// Sub-case B: file.hsm is null — reach into MergeManager by GUID
+						// so external tool writes (MegaMem, etc.) reach the idle HSM.
+						if (
+							file &&
+							isDocument(file) &&
+							!file.hsm &&
+							!file.isSaving &&
+							tfile instanceof TFile
+						) {
+							const hsm = folder.mergeManager?.getHSMForGuid(file.guid);
+							if (hsm) {
+								try {
+									const contents = await this.app.vault.read(tfile);
+									const encoder = new TextEncoder();
+									const hash = await generateHash(encoder.encode(contents).buffer);
+									hsm.send({
+										type: 'DISK_CHANGED',
+										contents,
+										mtime: tfile.stat.mtime,
+										hash,
+									});
+								} catch (e) {
+									vaultLog("Failed to send DISK_CHANGED to idle HSM", e);
+								}
+							}
+						}
+					};
+
+					// Debounce DISK_CHANGED using the folder's diskWriteDebounceMs setting.
+					// Default 1000ms absorbs Templater + MegaMem write chains.
+					// Set to 0 to dispatch immediately (legacy behavior).
+					const debounceMs = folder.diskWriteDebounceMs;
+					if (debounceMs > 0) {
+						const existing = pendingDiskTimers.get(tfile.path);
+						if (existing !== undefined) clearTimeout(existing);
+						const timer = setTimeout(async () => {
+							pendingDiskTimers.delete(tfile.path);
+							await dispatchDiskChanged();
+						}, debounceMs);
+						pendingDiskTimers.set(tfile.path, timer);
+					} else {
+						await dispatchDiskChanged();
 					}
-				}
 
 					// Dataview race condition
 					this.timeProvider.setTimeout(() => {
