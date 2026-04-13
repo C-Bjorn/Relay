@@ -333,11 +333,22 @@ export class HasProvider extends HasLogging {
 			return Promise.resolve();
 		}
 		this.ensureRemoteDoc();
-		return new Promise((resolve) => {
-			this._provider!.once("synced", () => {
+		return new Promise((resolve, reject) => {
+			const onSynced = () => {
+				this._provider!.off("connection-close", onClose);
 				this._providerSynced = true;
 				resolve();
-			});
+			};
+			const onClose = () => {
+				this._provider!.off("synced", onSynced);
+				reject(
+					new Error(
+						`[onceProviderSynced] Provider disconnected before sync: ${this.path}`,
+					),
+				);
+			};
+			this._provider!.once("synced", onSynced);
+			this._provider!.once("connection-close", onClose);
 		});
 	}
 

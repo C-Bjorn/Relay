@@ -296,7 +296,7 @@ export class BackgroundSync extends HasLogging {
 					.catch((error) => {
 						item.status = "failed";
 						metrics.incBgSyncOps("sync", "failed");
-
+	
 						const callback = this.syncCompletionCallbacks.get(item.guid);
 						if (callback) {
 							callback.reject(
@@ -304,11 +304,15 @@ export class BackgroundSync extends HasLogging {
 							);
 							this.syncCompletionCallbacks.delete(item.guid);
 						}
-
+	
 						const group = this.syncGroups.get(item.sharedFolder);
 						if (group) {
 							this.error("[Sync Failed]", error);
-							group.status = "failed";
+							group.completedSyncs++;
+							group.completed++;
+							if (group.completed === group.total) {
+								group.status = "failed";
+							}
 							this.syncGroups.set(item.sharedFolder, group);
 						}
 					})
@@ -327,7 +331,7 @@ export class BackgroundSync extends HasLogging {
 				item.status = "failed";
 				metrics.incBgSyncOps("sync", "failed");
 				metrics.observeBgSyncOp("sync", (performance.now() - opStart) / 1000);
-
+	
 				const callback = this.syncCompletionCallbacks.get(item.guid);
 				if (callback) {
 					callback.reject(
@@ -335,14 +339,18 @@ export class BackgroundSync extends HasLogging {
 					);
 					this.syncCompletionCallbacks.delete(item.guid);
 				}
-
+	
 				const group = this.syncGroups.get(item.sharedFolder);
 				if (group) {
 					this.error("[Sync Startup Failed]", error);
-					group.status = "failed";
+					group.completedSyncs++;
+					group.completed++;
+					if (group.completed === group.total) {
+						group.status = "failed";
+					}
 					this.syncGroups.set(item.sharedFolder, group);
 				}
-
+	
 				this.activeSync.delete(item);
 				metrics.setBgSyncActive("sync", this.activeSync.size);
 				this.inProgressSyncs.delete(item.guid);
@@ -653,14 +661,19 @@ export class BackgroundSync extends HasLogging {
 		const syncFiles = [...sharedFolder.files.values()].filter(isSyncFile);
 		const allItems = [...docs, ...canvases, ...syncFiles];
 
+		// Only count items that will actually run (not already stuck in inProgressSyncs)
+		const newItems = allItems.filter(
+			(item) => !this.inProgressSyncs.has(item.guid),
+		);
+
 		// Create sync group with properly initialized counters
 		const group: SyncGroup = {
 			sharedFolder,
-			total: allItems.length,
+			total: newItems.length,
 			completed: 0,
 			status: "pending",
 			downloads: 0,
-			syncs: allItems.length,
+			syncs: newItems.length,
 			completedDownloads: 0,
 			completedSyncs: 0,
 			userDownloads: 0,
@@ -670,12 +683,10 @@ export class BackgroundSync extends HasLogging {
 		// Register the group before enqueueing items
 		this.syncGroups.set(sharedFolder, group);
 
-		// Sort items by path for consistent sync order
-		const sortedDocs = [...docs, ...canvases, ...syncFiles].sort(
-			compareFilePaths,
-		);
+		// Sort items by path for consistent sync order (exclude already-in-progress)
+		const sortedItems = [...newItems].sort(compareFilePaths);
 
-		for (const doc of sortedDocs) {
+		for (const doc of sortedItems) {
 			this.enqueueForGroupSync(doc);
 		}
 
