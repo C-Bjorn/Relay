@@ -1333,6 +1333,15 @@ export class SharedFolder extends HasProvider {
 		remotePaths: string[],
 		diffLog: string[],
 	): Delete[] {
+		// SAFETY: If the remote has zero registered paths, this is either a brand-new
+		// empty server or a server that has never received these files. Treating an
+		// empty remote as "everything was remotely deleted" causes catastrophic local
+		// data loss when switching relay servers. Skip cleanup entirely — the upload
+		// path (addLocalDocs / pendingUpload) will re-upload the local files.
+		if (remotePaths.length === 0) {
+			return [];
+		}
+
 		// Delete files that are no longer shared
 		const ffiles = this.getSyncFiles();
 		const deletes: Delete[] = [];
