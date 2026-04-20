@@ -189,3 +189,80 @@ describe('Auto-resolve: idle fork-reconcile (invokeForkReconcile)', () => {
     expect(t.matches('idle.synced')).toBe(false);
   });
 });
+
+// =============================================================================
+// 3. _remoteMtime freeze: REMOTE_UPDATEs during an active fork must not
+//    advance _remoteMtime, preventing false "remote wins" in 'latest' mode.
+//    Regression tests for the MegaMem/external-tool write timing race.
+// =============================================================================
+
+describe("Auto-resolve: 'latest' mode — _remoteMtime freeze during active fork", () => {
+  test(
+    "REMOTE_UPDATE during fork must not advance _remoteMtime (timing-race freeze — disk wins)",
+    async () => {
+      const t = await createTestHSM({ getAutoResolveConflicts: () => 'latest' });
+      await loadToIdle(t, { content: 'original', mtime: 500 });
+      t.setProviderSynced(false);
+
+      // Disk write at T1=1000 → fork.created ≈ 1000, _remoteMtime = 0 (no prior remote)
+      t.time.setTime(1000);
+      t.send(await diskChanged('DISK', 1000));
+      await t.hsm.awaitIdleAutoMerge();
+
+      // REMOTE_UPDATE arrives at T1+500=1500 during the active fork (provider-resync echo).
+      // Bug: without guard, _remoteMtime=1500 > fork.created=1000 → remote wins (silent data loss).
+      // Fix: _remoteMtime frozen while fork active → stays 0 → disk wins.
+      t.time.setTime(1500);
+      t.applyRemoteChange('REMOTE');
+
+      t.send(connected());
+      t.send(providerSynced());
+      await t.hsm.awaitForkReconcile();
+      await t.hsm.awaitIdleAutoMerge();
+
+      expectState(t, 'idle.synced');
+      expect(t.getLocalDocText()).toBe('DISK');
+    }
+  );
+
+  test(
+    "pre-fork remote at T0, disk write at T1>T0: _remoteMtime frozen at T0, disk wins",
+    async () => {
+      const t = await createTestHSM({ getAutoResolveConflicts: () => 'latest' });
+
+      // Remote change at T0=500, no fork yet → _remoteMtime = 500
+      await loadToIdle(t, { content: 'original', mtime: 100 });
+      t.time.setTime(500);
+      t.applyRemoteChange('REMOTE');
+      // Let the remote merge settle: machine → idle.synced, LCA = 'REMOTE'
+      await t.hsm.awaitIdleAutoMerge();
+      if (t.matches('idle.localAhead')) {
+        t.send(connected());
+        t.send(providerSynced());
+        await t.hsm.awaitForkReconcile();
+        await t.hsm.awaitIdleAutoMerge();
+      }
+
+      t.setProviderSynced(false);
+
+      // Disk write at T1=1000 > T0=500 → fork.created ≈ 1000
+      t.time.setTime(1000);
+      t.send(await diskChanged('DISK', 1000));
+      await t.hsm.awaitIdleAutoMerge();
+
+      // Echo REMOTE_UPDATE at T1+500=1500 during active fork.
+      // Fix: _remoteMtime stays frozen at pre-fork value (500), not advanced to 1500.
+      // fork.created (1000) > _remoteMtime (500) → disk wins.
+      t.time.setTime(1500);
+      t.applyRemoteChange('REMOTE');
+
+      t.send(connected());
+      t.send(providerSynced());
+      await t.hsm.awaitForkReconcile();
+      await t.hsm.awaitIdleAutoMerge();
+
+      expectState(t, 'idle.synced');
+      expect(t.getLocalDocText()).toBe('DISK');
+    }
+  );
+});

@@ -1169,8 +1169,14 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 				} else {
 					this.pendingIdleUpdates = update;
 				}
-				// Record receive time for 'latest' auto-resolve timestamp comparison
-				this._remoteMtime = this.timeProvider.now();
+				// NOTE: Do not advance _remoteMtime while a fork is active.
+				// REMOTE_UPDATEs arriving during the post-fork PROVIDER_SYNCED resync cycle
+				// represent the server's pre-disk-write state — stamping them as "now" would
+				// make remote appear newer than the disk write in 'latest' mode, silently
+				// discarding the external tool's changes.
+				if (!this._fork) {
+					this._remoteMtime = this.timeProvider.now();
+				}
 			},
 			storeDiskMetadata: (_hsm, event) => {
 				const e = event as any;
