@@ -2005,13 +2005,19 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	}
 
 	private async invokeIdleThreeWayAutoMerge(signal: AbortSignal): Promise<unknown> {
-		// If fork-reconcile already detected a conflict, don't re-attempt the
-		// merge — the conflict data is authoritative and must be surfaced to
-		// the user when they open the file.
+		// If fork-reconcile already detected a conflict, check auto-resolve preference.
+		// With auto-resolve active ('latest', 'local', 'remote'), discard the persisted
+		// conflict data and run a fresh merge — prevents stale conflict state from old
+		// sessions or setting changes from permanently trapping files in conflict UI.
+		// With auto-resolve 'none', the conflict data is authoritative and must surface.
 		if (this.conflictData) {
-			this.pendingDiskContents = null;
-			this.pendingIdleUpdates = null;
-			return { success: false };
+			if (this._getAutoResolveConflicts() !== 'none') {
+				this.conflictData = null;
+			} else {
+				this.pendingDiskContents = null;
+				this.pendingIdleUpdates = null;
+				return { success: false };
+			}
 		}
 		if (!this._lca || !this.localDoc) {
 			this.pendingDiskContents = null;
