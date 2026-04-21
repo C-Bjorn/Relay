@@ -1938,7 +1938,19 @@ export class SharedFolder extends HasProvider {
 			await doc.hsm?.initializeFromRemote(updateBytes);
 
 			if (this.syncStore.has(doc.path)) {
-				await this.flush(doc, doc.text);
+				// doc.text reads from doc.ydoc (remoteDoc), which may be null/empty
+				// when the doc hasn't connected to the provider yet (isRemoteDocLoaded=false).
+				// Decode from updateBytes as the authoritative fallback so the file
+				// always lands on disk with real content — preventing Templater (or any
+				// folder-template plugin) from seeing an empty file and overwriting it.
+				let content = doc.text;
+				if (!content) {
+					const tmpDoc = new Y.Doc();
+					Y.applyUpdate(tmpDoc, updateBytes);
+					content = tmpDoc.getText("contents").toString();
+					tmpDoc.destroy();
+				}
+				await this.flush(doc, content);
 				await doc.hsm?.setLCA();
 			}
 		}
