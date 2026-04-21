@@ -8,9 +8,25 @@ True **multiplayer mode** for Obsidian. 💃🕺
 
 ![Relay Product Demo](https://f.system3.md/cdn-cgi/image/format=auto/demo.gif)
 
-Relay is a collaborative editing plugin for Obsidian by [System 3](https://system3.md/). It uses CRDTs to enable snappy, local-first, real-time and asynchronous collaboration.
+Relay is a collaborative editing plugin for Obsidian by [System 3](https://system3.md/). It uses CRDTs to enable snappy, local-first, real-time and asynchronous collaboration.
 
 [Join our Discord](https://discord.system3.md) for support and a good time.
+
+---
+
+> **This is a fork** of [Relay](https://github.com/No-Instructions/Relay) by [No Instructions, LLC](https://system3.md/), maintained by [C-Björn / ENDOGON](https://github.com/C-Bjorn). It extends the upstream plugin with additional features for advanced multi-tool Obsidian workflows.
+>
+> **Fork additions (v0.8.x–v0.9.x):**
+> - `same-user` conflict resolution — silently accepts disk writes from external tools (MegaMem, Claude Code) when the remote author is the same user
+> - `latest` conflict resolution — accepts whichever side was modified more recently (timestamp-based)
+> - `pendingUpload` relay-scoped key — protects local files from deletion when switching relay servers
+> - Disk write debounce — absorbs rapid external write chains before syncing
+> - Active fork circuit breaker — prevents mass file deletion on relay reconnect
+> - Merge HSM improvements — LCA recovery, hibernation, idle auto-merge, frontmatter repair
+>
+> Upstream repo: [No-Instructions/Relay](https://github.com/No-Instructions/Relay) · BRAT install: `C-Bjorn/Relay`
+
+---
 
 ### How does Relay work?
 
