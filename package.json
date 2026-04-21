@@ -1,6 +1,6 @@
 {
 	"name": "relay",
-	"version": "0.9.1-endogon.1",
+	"version": "0.9.1-endogon.2",
 	"description": "Real-time collaborative workspace for Obsidian.",
 	"main": "main.js",
 	"scripts": {
