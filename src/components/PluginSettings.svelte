@@ -319,15 +319,14 @@
 			></Relays>
 		</LoggedIn>
 	{/if}
+	<span class="relay-version">
+		v{plugin.manifest.version}
+	</span>
 </div>
 
 {#if flags().enableToasts}
 	<ToastManager />
 {/if}
-
-<span class="relay-version">
-	v{plugin.manifest.version}
-</span>
 
 <style>
 	.relay-version {

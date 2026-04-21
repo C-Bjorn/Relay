@@ -1371,6 +1371,21 @@ export class SharedFolder extends HasProvider {
 		};
 		files.forEach(sync);
 		folders.forEach(sync);
+
+		// CIRCUIT BREAKER: if we would delete more than 50% of local syncable files
+		// in a single sync cycle, something catastrophic is happening (server migration,
+		// relay reset, or reconnect to a server with a different file set). Abort all
+		// deletions to prevent mass data loss. Legitimate remote deletions are rare
+		// and almost never affect more than a handful of files at once.
+		const totalSyncable = files.filter((f) => this.isSyncableTFile(f)).length;
+		if (deletes.length > 0 && deletes.length >= Math.max(3, totalSyncable * 0.5)) {
+			diffLog.push(
+				`WARN: circuit breaker — aborted ${deletes.length} deletions (${totalSyncable} local files). ` +
+				`Too many at once; use bulk-resolve or manually remove files instead.`,
+			);
+			return [];
+		}
+
 		return deletes;
 	}
 
