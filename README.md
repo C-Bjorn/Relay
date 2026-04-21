@@ -14,7 +14,9 @@ Relay is a collaborative editing plugin for Obsidian by [System 3](https://syste
 
 ---
 
-> **This is a fork** of [Relay](https://github.com/No-Instructions/Relay) by [No Instructions, LLC](https://system3.md/), maintained by [C-Björn / ENDOGON](https://github.com/C-Bjorn). It extends the upstream plugin with additional features for advanced multi-tool Obsidian workflows.
+> **Maintained Fork** — This is the [ENDOGON](https://github.com/C-Bjorn) maintained fork of [Relay](https://github.com/No-Instructions/Relay) by No Instructions, LLC.
+> It includes features for advanced multi-tool Obsidian workflows not accepted upstream. Install via [BRAT](https://github.com/TfTHacker/obsidian42-brat): `C-Bjorn/Relay`.
+> For the official plugin, see [No-Instructions/Relay](https://github.com/No-Instructions/Relay).
 >
 > **Fork additions (v0.8.x–v0.9.x):**
 > - `same-user` conflict resolution — silently accepts disk writes from external tools (MegaMem, Claude Code) when the remote author is the same user
@@ -23,8 +25,6 @@ Relay is a collaborative editing plugin for Obsidian by [System 3](https://syste
 > - Disk write debounce — absorbs rapid external write chains before syncing
 > - Active fork circuit breaker — prevents mass file deletion on relay reconnect
 > - Merge HSM improvements — LCA recovery, hibernation, idle auto-merge, frontmatter repair
->
-> Upstream repo: [No-Instructions/Relay](https://github.com/No-Instructions/Relay) · BRAT install: `C-Bjorn/Relay`
 
 ---
 
