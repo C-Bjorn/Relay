@@ -73,7 +73,13 @@ export interface TestHSMOptions {
    * Per-folder conflict auto-resolve preference for testing.
    * Default: () => 'none' (show conflict UI, no automatic resolution).
    */
-  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
+  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest' | 'same-user';
+
+  /**
+   * User ID for PermanentUserData tracking.
+   * Required for 'same-user' auto-resolve mode tests.
+   */
+  userId?: string;
 }
 
 export interface TestHSM {
@@ -360,6 +366,7 @@ export async function createTestHSM(options: TestHSMOptions = {}): Promise<TestH
     isProviderSynced: () => providerState.synced,
     replayMode: options.replayMode,
     getAutoResolveConflicts: options.getAutoResolveConflicts,
+    userId: options.userId,
     yaml: {
       parse: (raw: string) => jsyaml.load(raw, { schema: jsyaml.JSON_SCHEMA }) as any,
       stringify: (obj: any) => jsyaml.dump(obj, { schema: jsyaml.JSON_SCHEMA, flowLevel: -1, lineWidth: -1 }),

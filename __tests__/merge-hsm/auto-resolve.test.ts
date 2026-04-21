@@ -7,6 +7,7 @@
  *  2. invokeForkReconcile          (idle.localAhead — fork path)
  */
 
+import * as Y from 'yjs';
 import {
   createTestHSM,
   diskChanged,
@@ -15,6 +16,23 @@ import {
   loadToIdle,
   expectState,
 } from 'src/merge-hsm/testing';
+
+/**
+ * Write a clientId → userId mapping into a Y.Doc's "users" Y.Map.
+ * Mirrors Y.PermanentUserData.setUserMapping without registering observers.
+ * Call BEFORE loadToIdle so the entry is part of the LCA baseline.
+ */
+function setupRemotePUD(doc: Y.Doc, userId: string): void {
+  doc.transact(() => {
+    const usersMap = doc.getMap<Y.Array<number>>('users');
+    let arr = usersMap.get(userId);
+    if (!arr) {
+      arr = new Y.Array<number>();
+      usersMap.set(userId, arr);
+    }
+    arr.push([doc.clientID]);
+  });
+}
 
 // =============================================================================
 // Helper: drive to idle.diverged with a TRUE three-way conflict
@@ -261,6 +279,117 @@ describe("Auto-resolve: 'latest' mode — _remoteMtime freeze during active fork
       await t.hsm.awaitForkReconcile();
       await t.hsm.awaitIdleAutoMerge();
 
+      expectState(t, 'idle.synced');
+      expect(t.getLocalDocText()).toBe('DISK');
+    }
+  );
+});
+
+// =============================================================================
+// 4. Auto-resolve: 'same-user' mode — PUD-based authorship check
+//    Silently accepts disk write when remote-since-LCA is entirely self-authored.
+// =============================================================================
+
+describe("Auto-resolve: 'same-user' mode — PUD authorship check", () => {
+  test(
+    "same-user, self-authored remote — disk wins (resolves to idle.synced)",
+    async () => {
+      const userId = 'user-alice';
+      const t = await createTestHSM({
+        getAutoResolveConflicts: () => 'same-user',
+        userId,
+      });
+
+      // Map remoteDoc.clientID → userId in the "users" Y.Map
+      setupRemotePUD(t.hsm.getRemoteDoc()!, userId);
+
+      await driveToIdleThreeWayConflict(t, { remoteMtime: 1000, diskMtime: 2000 });
+
+      // same-user resolved to 'local' → disk wins
+      expectState(t, 'idle.synced');
+      expect(t.getLocalDocText()).toBe('DISK');
+    }
+  );
+
+  test(
+    "same-user, remote by different user — conflict UI shown (not auto-resolved)",
+    async () => {
+      const t = await createTestHSM({
+        getAutoResolveConflicts: () => 'same-user',
+        userId: 'user-alice',
+      });
+
+      // Remote client belongs to a DIFFERENT user → shouldn't auto-resolve
+      setupRemotePUD(t.hsm.getRemoteDoc()!, 'user-bob');
+
+      await driveToIdleThreeWayConflict(t, { remoteMtime: 1000, diskMtime: 2000 });
+
+      // Different author → fall through to conflict UI
+      expect(t.matches('idle.synced')).toBe(false);
+    }
+  );
+
+  test(
+    "same-user, no PUD on remoteDoc — conflict UI shown (authorship unconfirmable)",
+    async () => {
+      const t = await createTestHSM({
+        getAutoResolveConflicts: () => 'same-user',
+        userId: 'user-alice',
+        // No setupRemotePUD → getRemoteAuthorUserIds returns empty set
+      });
+
+      await driveToIdleThreeWayConflict(t, { remoteMtime: 1000, diskMtime: 2000 });
+
+      // Can't confirm authorship → fall through to conflict UI
+      expect(t.matches('idle.synced')).toBe(false);
+    }
+  );
+
+  test(
+    "same-user, no userId configured on HSM — conflict UI shown",
+    async () => {
+      const t = await createTestHSM({
+        getAutoResolveConflicts: () => 'same-user',
+        // userId not provided → this._userId is undefined
+      });
+
+      // PUD is set up but HSM has no userId to compare against
+      setupRemotePUD(t.hsm.getRemoteDoc()!, 'user-alice');
+
+      await driveToIdleThreeWayConflict(t, { remoteMtime: 1000, diskMtime: 2000 });
+
+      // No local userId → resolveAutoResolveMode returns null → conflict UI
+      expect(t.matches('idle.synced')).toBe(false);
+    }
+  );
+
+  test(
+    "same-user, fork-reconcile path: self-authored remote fork → disk wins",
+    async () => {
+      const userId = 'user-alice';
+      const t = await createTestHSM({
+        getAutoResolveConflicts: () => 'same-user',
+        userId,
+      });
+
+      setupRemotePUD(t.hsm.getRemoteDoc()!, userId);
+
+      // Use fork-reconcile path directly (disk change first, then provider syncs with remote change)
+      await loadToIdle(t, { content: 'original', mtime: 500 });
+      t.setProviderSynced(false);
+
+      t.send(await diskChanged('DISK', 2000));
+      await t.hsm.awaitIdleAutoMerge();
+
+      t.time.setTime(1000);
+      t.applyRemoteChange('REMOTE');
+
+      t.send(connected());
+      t.send(providerSynced());
+      await t.hsm.awaitForkReconcile();
+      await t.hsm.awaitIdleAutoMerge();
+
+      // same-user resolved to 'local' in fork-reconcile → disk wins
       expectState(t, 'idle.synced');
       expect(t.getLocalDocText()).toBe('DISK');
     }

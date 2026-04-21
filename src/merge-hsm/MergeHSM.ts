@@ -187,7 +187,7 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	private lastKnownEditorText: string | null = null;
 
 	// Per-folder conflict auto-resolve preference callback
-	private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest';
+	private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 
 	// Wall-clock timestamp of the most recently received remote CRDT update (ms since epoch).
 	// Used by 'latest' auto-resolve mode to compare against disk mtime.
@@ -1743,8 +1743,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 					// Check auto-resolve preference before surfacing conflict UI.
 					// In fork-reconcile: localContent = disk-ingested, remoteContent = CRDT.
 					// Use fork.created as disk mtime proxy (timestamp when disk edit was ingested).
-					const forkAutoResolve = this._getAutoResolveConflicts();
-					if (forkAutoResolve !== 'none') {
+					const forkAutoResolve = this.resolveAutoResolveMode();
+					if (forkAutoResolve !== null) {
 						const chosen = this.pickAutoResolveContent(
 							forkAutoResolve, remoteContent, localContent, fork.created
 						);
@@ -2062,7 +2062,7 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 
 		if (!mergeResult.success) {
 			// Check per-folder auto-resolve preference before creating a fork.
-			const autoResolve = this._getAutoResolveConflicts();
+			const autoResolve = this.resolveAutoResolveMode();
 			if (autoResolve === 'remote') {
 				// Silently accept the server/CRDT state — disk was written by an
 				// external tool (MegaMem, Claude Code) and the live-editor wins.
@@ -2234,8 +2234,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 
 		// Merge conflict — check auto-resolve preference before storing conflictData.
 		// localContent = disk-ingested (Local), remoteContent = CRDT (Remote).
-		const idleForkAutoResolve = this._getAutoResolveConflicts();
-		if (idleForkAutoResolve !== 'none') {
+		const idleForkAutoResolve = this.resolveAutoResolveMode();
+		if (idleForkAutoResolve !== null) {
 			const chosen = this.pickAutoResolveContent(
 				idleForkAutoResolve, remoteContent, localContent, fork.created
 			);
@@ -2419,6 +2419,71 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	}
 
 	/**
+	 * Enumerate the set of userIds who authored ops on remoteDoc since the given
+	 * baseline state vector (typically LCA stateVector). Uses a throwaway Y.Doc
+	 * to isolate the delta, then reverse-maps clientIDs via remoteDoc's "users" map.
+	 *
+	 * Returns an empty set if remoteDoc is unavailable, the update is empty,
+	 * or no clientID→userId mapping exists for the contributing clients.
+	 */
+	private getRemoteAuthorUserIds(lcaStateVector: Uint8Array): Set<string> {
+		if (!this.remoteDoc) return new Set();
+		const updateSinceLCA = Y.encodeStateAsUpdate(this.remoteDoc, lcaStateVector);
+		// byteLength <= 2 means the update encoder wrote only a header with no structs
+		if (updateSinceLCA.byteLength <= 2) return new Set();
+
+		// Apply to a throwaway doc to enumerate which clientIDs contributed ops.
+		const throwaway = new Y.Doc();
+		try {
+			Y.applyUpdate(throwaway, updateSinceLCA);
+			const svMap = Y.decodeStateVector(Y.encodeStateVector(throwaway));
+			if (svMap.size === 0) return new Set();
+
+			// Build clientId → userId reverse index from remoteDoc's "users" Y.Map.
+			// PermanentUserData structure: userId (string key) → Y.Array<clientId (number)>
+			const clientToUser = new Map<number, string>();
+			this.remoteDoc.getMap<Y.Array<number>>('users').forEach((arr, userId) => {
+				arr.toArray().forEach((clientId) => clientToUser.set(clientId, userId));
+			});
+
+			const authorIds = new Set<string>();
+			for (const clientId of svMap.keys()) {
+				const uid = clientToUser.get(clientId);
+				if (uid) authorIds.add(uid);
+			}
+			return authorIds;
+		} finally {
+			throwaway.destroy();
+		}
+	}
+
+	/**
+	 * Resolve the configured auto-resolve mode to a concrete pick strategy.
+	 *
+	 * Returns 'remote' | 'local' | 'latest' when the mode can be applied, or
+	 * null when the caller should fall through to conflict UI. Handles
+	 * 'same-user' by inspecting PermanentUserData on remoteDoc: if all remote
+	 * ops since LCA were authored by this._userId, resolves to 'local' (disk
+	 * wins). Otherwise returns null (show conflict UI — different author or
+	 * authorship unconfirmable).
+	 */
+	private resolveAutoResolveMode(): 'remote' | 'local' | 'latest' | null {
+		const mode = this._getAutoResolveConflicts();
+		if (mode === 'none') return null;
+		if (mode !== 'same-user') return mode;
+
+		// 'same-user': confirm all remote-since-LCA ops are self-authored
+		const lcaSV = this._lca?.stateVector;
+		if (!lcaSV || !this._userId) return null;
+
+		const authorIds = this.getRemoteAuthorUserIds(lcaSV);
+		if (authorIds.size === 1 && authorIds.has(this._userId)) {
+			return 'local'; // sole remote author is self → disk wins
+		}
+		return null; // different author, or no PUD mapping → show conflict UI
+	}
+
+	/**
 	 * Pick the auto-resolve winner based on the configured mode.
 	 *
 	 * @param mode  - The auto-resolve mode ('remote', 'local', or 'latest')
@@ -2462,8 +2527,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 
 		// Check auto-resolve preference before showing conflict UI.
 		// localText = CRDT/Remote side; diskText = editor/disk/Local side.
-		const twoWayAutoResolve = this._getAutoResolveConflicts();
-		if (twoWayAutoResolve !== 'none') {
+		const twoWayAutoResolve = this.resolveAutoResolveMode();
+		if (twoWayAutoResolve !== null) {
 			const chosen = this.pickAutoResolveContent(twoWayAutoResolve, localText, diskText);
 			if (chosen !== null) {
 				this.applyContentToLocalDoc(chosen);
@@ -2556,8 +2621,8 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 		} else {
 			// Check auto-resolve preference before showing conflict UI.
 			// localText = CRDT/Remote side; diskText = editor/disk/Local side.
-			const threeWayAutoResolve = this._getAutoResolveConflicts();
-			if (threeWayAutoResolve !== 'none') {
+			const threeWayAutoResolve = this.resolveAutoResolveMode();
+			if (threeWayAutoResolve !== null) {
 				const chosen = this.pickAutoResolveContent(threeWayAutoResolve, localText, diskText);
 				if (chosen !== null) {
 					this.applyContentToLocalDoc(chosen);

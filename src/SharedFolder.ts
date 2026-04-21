@@ -75,7 +75,7 @@ export interface SharedFolderSettings {
 	localOnly?: boolean;
 	sync?: SyncFlags;
 	/** Per-folder conflict auto-resolution preference. Default: 'none' (show UI). */
-	autoResolveConflicts?: 'none' | 'remote' | 'local' | 'latest';
+	autoResolveConflicts?: 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 	/**
 	 * Quiet period (ms) after last vault.on("modify") for a file before dispatching DISK_CHANGED.
 	 * Absorbs rapid write chains (e.g. Templater → MegaMem) into a single DISK_CHANGED.
@@ -161,7 +161,7 @@ export class SharedFolder extends HasProvider {
 	_remote?: RemoteSharedFolder;
 	_shouldConnect: boolean;
 	private _localOnly: boolean;
-	private _autoResolveConflicts: 'none' | 'remote' | 'local' | 'latest' = 'none';
+	private _autoResolveConflicts: 'none' | 'remote' | 'local' | 'latest' | 'same-user' = 'none';
 	private _diskWriteDebounceMs: number = 1000;
 	destroyed: boolean = false;
 	public vault: Vault;
@@ -856,11 +856,11 @@ export class SharedFolder extends HasProvider {
 		this.mergeManager?.setLocalOnly(guids, value);
 	}
 
-	public get autoResolveConflicts(): 'none' | 'remote' | 'local' | 'latest' {
+	public get autoResolveConflicts(): 'none' | 'remote' | 'local' | 'latest' | 'same-user' {
 		return this._autoResolveConflicts;
 	}
 
-	public set autoResolveConflicts(value: 'none' | 'remote' | 'local' | 'latest') {
+	public set autoResolveConflicts(value: 'none' | 'remote' | 'local' | 'latest' | 'same-user') {
 		if (this._autoResolveConflicts === value) return;
 		this._autoResolveConflicts = value;
 		this._settings.update((current) => ({

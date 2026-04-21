@@ -830,7 +830,7 @@ export interface MergeHSMConfig {
 	 * Defaults to () => 'none' (show conflict UI, no automatic resolution).
 	 * 'latest' picks whichever side has the more recent modification timestamp.
 	 */
-	getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
+	getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 }
 
 // =============================================================================

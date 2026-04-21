@@ -141,7 +141,7 @@ export interface MergeManagerConfig {
    * Defaults to () => 'none' (manual resolution).
    * 'latest' picks whichever side has the more recent modification timestamp.
    */
-  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest';
+  getAutoResolveConflicts?: () => 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 }
 
 export interface PollOptions {
@@ -278,7 +278,7 @@ export class MergeManager {
   private userId?: string;
   private _yaml: { parse: (yaml: string) => any; stringify: (obj: any) => string } | null = null;
   private _onTransition?: (guid: string, path: string, info: { from: import('./types').StatePath; to: import('./types').StatePath; event: import('./types').MergeEvent; effects: import('./types').MergeEffect[] }) => void;
-  private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest';
+  private _getAutoResolveConflicts: () => 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 
   constructor(config: MergeManagerConfig) {
     this._getVaultId = config.getVaultId;

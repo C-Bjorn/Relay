@@ -14,7 +14,7 @@
 	const dispatch = createEventDispatcher();
 
 	// ── per-folder auto-resolve setting ─────────────────────────────────────
-	type AutoResolve = 'none' | 'remote' | 'local' | 'latest';
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 
 	let autoResolve: AutoResolve = sharedFolder?.autoResolveConflicts ?? 'none';
 
@@ -100,6 +100,7 @@
 				<option value="remote">Prefer Remote — always accept server/editor state</option>
 				<option value="local">Prefer Local — always accept disk/external writes</option>
 				<option value="latest">Prefer Latest — accept most recent</option>
+				<option value="same-user">Same User — skip conflicts when remote author is you</option>
 			</select>
 		</SettingItem>
 		<SettingItem
