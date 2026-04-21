@@ -10,9 +10,9 @@
 	import SettingItem from "./SettingItem.svelte";
 	import type Live from "src/main";
 	import { SharedFolders, type SharedFolder } from "src/SharedFolder";
-	import { debounce } from "obsidian";
+	import { debounce, Notice } from "obsidian";
 	import { createEventDispatcher, onMount } from "svelte";
-	import { derived, writable } from "svelte/store";
+	import { derived, writable, get } from "svelte/store";
 	import type { ObservableMap } from "src/observable/ObservableMap";
 	import Breadcrumbs from "./Breadcrumbs.svelte";
 	import AccountSettingItem from "./AccountSettingItem.svelte";
@@ -56,8 +56,8 @@
 		return $roles.values().sort(rolePrioritySort);
 	});
 
-	function rolePrioritySort(a: { name: Role }, b: { name: Role }) {
-		const priority: Record<Role, number> = { Owner: 0, Member: 1, Reader: 2 };
+	function rolePrioritySort(a: { name: string }, b: { name: string }) {
+		const priority: Record<string, number> = { Owner: 0, Member: 1, Reader: 2 };
 		return (priority[a.name] ?? 999) - (priority[b.name] ?? 999);
 	}
 
@@ -125,6 +125,43 @@
 
 	let syncSettings: SyncSettingsManager | undefined =
 		$folderStore?.syncSettingsManager;
+
+	// ── per-folder auto-resolve setting ────────────────────────────────────
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest' | 'same-user';
+	let autoResolve: AutoResolve = $folderStore?.autoResolveConflicts ?? 'none';
+
+	function onAutoResolveChange() {
+		const folder = get(folderStore);
+		if (folder) {
+			folder.autoResolveConflicts = autoResolve;
+		}
+	}
+
+	// ── disk write debounce setting ─────────────────────────────────────────
+	let diskDebounceMs: number = $folderStore?.diskWriteDebounceMs ?? 1000;
+
+	function onDiskDebounceChange() {
+		const folder = get(folderStore);
+		if (folder) {
+			folder.diskWriteDebounceMs = diskDebounceMs;
+		}
+	}
+
+	// ── Fix 5: reset HSM state ──────────────────────────────────────────────
+	let resetting = false;
+
+	async function handleResetSyncState() {
+		if (!$folderStore || resetting) return;
+		resetting = true;
+		try {
+			await $folderStore.resetHSMState();
+			new Notice(`Relay: Sync state reset for "${$folderStore.path}". Re-open files to apply.`);
+		} catch (e) {
+			new Notice(`Relay: Failed to reset sync state: ${e}`);
+		} finally {
+			resetting = false;
+		}
+	}
 
 	let noStorage = derived(
 		[folderStore, relayRoles],
@@ -214,7 +251,7 @@
 		try {
 			await plugin.relayManager.deleteRemote(remoteFolder);
 			if ($folderStore) {
-				$folderStore.remote = undefined;
+				get(folderStore)!.remote = undefined;
 				plugin.sharedFolders.notifyListeners();
 				dispatch("manageSharedFolder", { folder: $folderStore });
 				return;
@@ -290,9 +327,11 @@
 
 	async function handleFolderRoleChangeEvent(event: Event) {
 		const target = event.target as HTMLSelectElement;
-		const folderRole = $virtualFolderRoles.find(
+		const found = $virtualFolderRoles.find(
 			(role) => role.id === target.dataset.roleId!,
 		);
+		// Only FolderRole objects can be changed via this handler
+		const folderRole = (found && 'sharedFolderId' in found) ? found as FolderRole : null;
 		if (folderRole) {
 			const originalRole = folderRole.role;
 			try {
@@ -314,11 +353,10 @@
 			if (plugin.vault.getFolderByPath(vaultRelativePath) === null) {
 				await plugin.vault.createFolder(vaultRelativePath);
 			}
-			const folder = plugin.sharedFolders.new(
+			const folder = plugin.sharedFolders.clone(
 				vaultRelativePath,
 				remoteFolder.guid,
 				remoteFolder.relay.guid,
-				true,
 			);
 			folder.remote = remoteFolder;
 			plugin.sharedFolders.notifyListeners();
@@ -368,7 +406,7 @@
 		} catch (error) {
 			errorLog("Failed to update folder name:", error);
 			// If it's a 400 error, mark the name as invalid
-			if (error?.status === 400) {
+			if ((error as any)?.status === 400) {
 				nameValid.set(false);
 			}
 			updating.set(false);
@@ -586,6 +624,49 @@
 		{/if}
 		</SettingGroup>
 	</div>
+
+	<SettingItemHeading name="Conflict resolution"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Auto-resolve conflicts"
+			description="When a conflict is detected — which version wins automatically? 'Prefer Latest' accepts whichever side was modified most recently."
+		>
+			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
+					<option value="none">Manual — show conflict UI</option>
+					<option value="remote">Prefer Remote — accept server/editor state</option>
+					<option value="local">Prefer Local — accept external writes</option>
+					<option value="latest">Prefer Latest — accept most recent</option>
+					<option value="same-user">Same User — skip conflicts when remote author is you</option>
+				</select>
+		</SettingItem>
+		<SettingItem
+			name="Disk write delay"
+			description="Quiet period after a file is written before Relay syncs it. Increase for folders written by external tools (MegaMem, Claude Code) to absorb rapid write chains. Default: 1 second."
+		>
+			<select bind:value={diskDebounceMs} on:change={onDiskDebounceChange}>
+				<option value={0}>Off — sync immediately</option>
+				<option value={500}>Fast — 0.5 seconds</option>
+				<option value={1000}>Standard — 1 second (default)</option>
+				<option value={3000}>Relaxed — 3 seconds</option>
+				<option value={30000}>Slow — 30 seconds</option>
+			</select>
+		</SettingItem>
+	</SettingGroup>
+
+	<SettingItemHeading name="Maintenance"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Reset sync state"
+			description="Clears all persisted merge history (LCA, fork, deferred conflicts). Use after an upgrade if resolved conflicts keep reappearing. Document content is not affected."
+		>
+			<button
+				disabled={resetting}
+				on:click={debounce(() => { handleResetSyncState(); })}
+			>
+				{resetting ? "Resetting…" : "Reset sync state"}
+			</button>
+		</SettingItem>
+	</SettingGroup>
 {/if}
 
 <div class="spacer"></div>

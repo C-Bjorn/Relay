@@ -123,17 +123,15 @@
 }
 
 .system3-banner > span {
-	font-weight: bold;
 	display: flex;
 	flex-grow: 1;
 	font-size: var(--font-ui-medium);
 	color: var(--text-on-accent);
 	font: var(--font-interface-theme);
-	text-shadow: var(--input-shadow);
 }
 
-.system3-login-button,
-.system3-merge-button {
+.system3-header-button,
+.system3-login-button {
 	background: var(--interactive-accent) !important;
 	color: var(--text-on-accent) !important;
 	border: var(--modal-border-width) solid var(--pill-border-color-hover) !important;
@@ -211,48 +209,28 @@
 	text-align: right;
 }
 
-@media (prefers-color-scheme: light) {
-	.file-diff__top-line__bg {
-		background-color: #d9f4ef;
-		border-radius: 0.25rem; /* 4px */
-	}
+/* Theme-adaptive diff colors using Obsidian CSS variables.
+   Uses .theme-dark / .theme-light body classes (set by Obsidian regardless of
+   system prefers-color-scheme) so these work even when system ≠ Obsidian theme. */
 
-	.file-diff_top-line__character {
-		background-color: #99e1d3;
-		border-radius: 0.25rem; /* 4px */
-	}
-
-	.file-diff__bottom-line__bg {
-		background-color: #d9edff;
-		border-radius: 0.25rem; /* 4px */
-	}
-
-	.file-diff_bottom-line__character {
-		background-color: #b1d4f2;
-		border-radius: 0.25rem; /* 4px */
-	}
+.file-diff__top-line__bg {
+	background-color: color-mix(in srgb, var(--color-green) 15%, transparent);
+	border-radius: 0.25rem;
 }
 
-@media (prefers-color-scheme: dark) {
-	.file-diff__top-line__bg {
-		background-color: #25403b;
-		border-radius: 0.25rem; /* 4px */
-	}
+.file-diff_top-line__character {
+	background-color: color-mix(in srgb, var(--color-green) 35%, transparent);
+	border-radius: 0.25rem;
+}
 
-	.file-diff_top-line__character {
-		background-color: #236559;
-		border-radius: 0.25rem; /* 4px */
-	}
+.file-diff__bottom-line__bg {
+	background-color: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+	border-radius: 0.25rem;
+}
 
-	.file-diff__bottom-line__bg {
-		background-color: #25394b;
-		border-radius: 0.25rem; /* 4px */
-	}
-
-	.file-diff_bottom-line__character {
-		background-color: #2e618d;
-		border-radius: 0.25rem; /* 4px */
-	}
+.file-diff_bottom-line__character {
+	background-color: color-mix(in srgb, var(--interactive-accent) 28%, transparent);
+	border-radius: 0.25rem;
 }
 
 .file-diff__no-bottom-border {
@@ -266,7 +244,7 @@
 }
 
 .file-diff__action-line {
-	color: #919191;
+	color: var(--text-muted);
 }
 
 /* Tailwind CSS */

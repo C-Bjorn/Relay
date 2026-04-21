@@ -319,40 +319,27 @@
 			></Relays>
 		</LoggedIn>
 	{/if}
+	<span class="relay-version">
+		v{plugin.manifest.version}
+	</span>
 </div>
 
 {#if flags().enableToasts}
 	<ToastManager />
 {/if}
 
-{#if plugin.manifest.version !== plugin.version}
-	<span class="relay-version">
-		{plugin.version}
-	</span>
-{/if}
-
 <style>
 	.relay-version {
 		user-select: auto;
-		background: var(--color-base-10);
+		display: block;
+		text-align: right;
 		color: var(--text-faint);
-		position: absolute;
-		bottom: 0;
-		right: 0;
 		font-size: xx-small;
-		padding-right: 1em;
-		padding-top: 0.3em;
-		padding-left: 1em;
-		border-top-left-radius: 1em;
+		padding: 0.3em 1em;
+		opacity: 0.7;
 	}
 	.vertical-tab-content {
 		max-height: var(--modal-max-height);
 		position: relative;
-	}
-	.system3-announcement-banner {
-		padding-left: 48px !important;
-	}
-	.system3-announcement {
-		color: var(--text-on-accent);
 	}
 </style>

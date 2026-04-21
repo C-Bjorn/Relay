@@ -49,3 +49,12 @@
 		</span>
 	</div>
 {/if}
+
+<style>
+	.system3-announcement-banner {
+		padding-left: 48px !important;
+	}
+	.system3-announcement {
+		color: var(--text-on-accent);
+	}
+</style>

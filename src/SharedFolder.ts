@@ -1,4 +1,5 @@
 "use strict";
+import { uuidv4 } from "lib0/random";
 import {
 	FileManager,
 	TAbstractFile,
@@ -7,22 +8,25 @@ import {
 	Vault,
 	debounce,
 	normalizePath,
+	parseYaml,
+	stringifyYaml,
 } from "obsidian";
-import { IndexeddbPersistence } from "./storage/y-indexeddb";
-import * as idb from "lib0/indexeddb";
+import {
+	IndexeddbPersistence,
+} from "./storage/y-indexeddb";
 import { dirname, join, sep } from "path-browserify";
 import { HasProvider, type ConnectionIntent } from "./HasProvider";
+import type { EventMessage } from "./client/provider";
 import { Document } from "./Document";
 import { ObservableSet } from "./observable/ObservableSet";
 import { LoginManager } from "./LoginManager";
 import { LiveTokenStore } from "./LiveTokenStore";
 
 import { SharedPromise, Dependency, withTimeoutWarning } from "./promiseUtils";
-import { S3Folder, S3RN, S3RemoteFolder } from "./S3RN";
+import { S3Folder, S3RN, S3RemoteFolder, S3RemoteDocument } from "./S3RN";
 import type { RemoteSharedFolder } from "./Relay";
 import { RelayManager } from "./RelayManager";
 import type { Unsubscriber } from "svelte/store";
-import { DiskBufferStore } from "./DiskBuffer";
 import { BackgroundSync } from "./BackgroundSync";
 import type { NamespacedSettings } from "./SettingsStorage";
 import { RelayInstances } from "./debug";
@@ -37,6 +41,7 @@ import {
 	makeFileMeta,
 	makeFolderMeta,
 	isSyncFileMeta,
+	isDocumentMeta,
 	isCanvasMeta,
 	type FileMeta,
 	type Meta,
@@ -49,13 +54,34 @@ import { SyncSettingsManager, type SyncFlags } from "./SyncSettings";
 import { ContentAddressedFileStore, SyncFile, isSyncFile } from "./SyncFile";
 import { Canvas, isCanvas } from "./Canvas";
 import { flags } from "./flagManager";
+import { MergeManager } from "./merge-hsm/MergeManager";
+import {
+	E2ERecordingBridge,
+	type HSMLogEntry,
+} from "./merge-hsm/recording";
+import { recordHSMEntry } from "./debug";
+import { awaitOnReload } from "./reloadUtils";
+import { generateHash } from "./hashing";
+import {
+	HSMStore,
+} from "./merge-hsm/persistence";
+import * as Y from "yjs";
 
 export interface SharedFolderSettings {
 	guid: string;
 	path: string;
 	relay?: string;
 	connect?: boolean;
+	localOnly?: boolean;
 	sync?: SyncFlags;
+	/** Per-folder conflict auto-resolution preference. Default: 'none' (show UI). */
+	autoResolveConflicts?: 'none' | 'remote' | 'local' | 'latest' | 'same-user';
+	/**
+	 * Quiet period (ms) after last vault.on("modify") for a file before dispatching DISK_CHANGED.
+	 * Absorbs rapid write chains (e.g. Templater → MegaMem) into a single DISK_CHANGED.
+	 * Default: 1000 (1 second). Set to 0 to disable (immediate dispatch, legacy behavior).
+	 */
+	diskWriteDebounceMs?: number;
 }
 
 interface Operation {
@@ -134,6 +160,9 @@ export class SharedFolder extends HasProvider {
 	relayId?: string;
 	_remote?: RemoteSharedFolder;
 	_shouldConnect: boolean;
+	private _localOnly: boolean;
+	private _autoResolveConflicts: 'none' | 'remote' | 'local' | 'latest' | 'same-user' = 'none';
+	private _diskWriteDebounceMs: number = 1000;
 	destroyed: boolean = false;
 	public vault: Vault;
 	syncStore: SyncStore;
@@ -151,11 +180,14 @@ export class SharedFolder extends HasProvider {
 	private storageQuota?: number;
 	private pendingDeletes: Set<string> = new Set();
 
+
 	private _persistence: IndexeddbPersistence;
-	diskBufferStore: DiskBufferStore;
 	proxy: SharedFolder;
 	cas: ContentAddressedStore;
 	syncSettingsManager: SyncSettingsManager;
+	mergeManager: MergeManager;
+	private recordingBridge: E2ERecordingBridge;
+	private _pendingKeyframeUpdates: Map<string, Uint8Array[]> = new Map();
 
 	constructor(
 		public appId: string,
@@ -169,8 +201,9 @@ export class SharedFolder extends HasProvider {
 		private hashStore: ContentAddressedFileStore,
 		public backgroundSync: BackgroundSync,
 		private _settings: NamespacedSettings<SharedFolderSettings>,
+		private _hsmStore: HSMStore,
 		relayId?: string,
-		awaitingUpdates: boolean = true,
+		authoritative: boolean = false,
 	) {
 		const s3rn = relayId
 			? new S3RemoteFolder(relayId, guid)
@@ -184,7 +217,7 @@ export class SharedFolder extends HasProvider {
 		this.files = new Map();
 		this.fset = new Files();
 		this.pendingUpload = new LocalStorage<string>(
-			`${appId}-system3-relay/folders/${this.guid}/pendingUploads`,
+			this._buildPendingUploadKey(relayId),
 		);
 		this.pendingUpload.forEach((guid, vpath) => {
 			if (!this.existsSync(vpath)) {
@@ -198,10 +231,12 @@ export class SharedFolder extends HasProvider {
 		});
 		this.relayManager = relayManager;
 		this.relayId = relayId;
-		this.diskBufferStore = new DiskBufferStore();
 		this._shouldConnect = this.settings.connect ?? true;
+		this._localOnly = this.settings.localOnly ?? false;
+		this._autoResolveConflicts = this.settings.autoResolveConflicts ?? 'none';
+		this._diskWriteDebounceMs = this.settings.diskWriteDebounceMs ?? 1000;
 
-		this.authoritative = !awaitingUpdates;
+		this.authoritative = authoritative;
 
 		this.syncSettingsManager = this._settings.getChild<
 			Record<keyof SyncFlags, boolean>,
@@ -215,7 +250,7 @@ export class SharedFolder extends HasProvider {
 			this.syncSettingsManager,
 		);
 		this.syncStore.on(async () => {
-			await this.syncFileTree(this.syncStore);
+			await this.syncFileTree();
 		});
 
 		this.unsubscribes.push(
@@ -256,11 +291,20 @@ export class SharedFolder extends HasProvider {
 		});
 
 		try {
-			this._persistence = new IndexeddbPersistence(this.guid, this.ydoc);
+			const folderDbName = `${this.appId}-relay-folder-${this.guid}`;
+			this._persistence = new IndexeddbPersistence(
+				folderDbName, this.ydoc, null, null, this.guid
+			);
 		} catch (e) {
 			this.warn("Unable to open persistence.", this.guid);
 			console.error(e);
 			throw e;
+		}
+
+		// If folder is authoritative (local-only, not awaiting server updates),
+		// mark it as server synced so it's considered "ready" even after reload
+		if (this.authoritative) {
+			this._persistence.markServerSynced();
 		}
 
 		if (loginManager.loggedIn) {
@@ -269,10 +313,104 @@ export class SharedFolder extends HasProvider {
 
 		this.cas = new ContentAddressedStore(this);
 
-		this.whenReady().then(() => {
+		// Create MergeManager for this SharedFolder (per-folder instance)
+		this.mergeManager = new MergeManager({
+			getVaultId: (guid: string) => `${this.appId}-relay-doc-${guid}`,
+			getDocument: (guid: string) => {
+				const file = this.files.get(guid);
+				if (!file || !isDocument(file)) return undefined;
+				return file;
+			},
+			timeProvider: undefined, // Use default
+			createPersistence: (vaultId, doc, userId, captureOpts) =>
+				new IndexeddbPersistence(vaultId, doc, userId, captureOpts),
+			getDiskState: async (docPath: string) => {
+				// docPath is SharedFolder-relative (e.g., "/note.md")
+				const vaultPath = this.getPath(docPath);
+				const tfile = this.vault.getAbstractFileByPath(vaultPath);
+				if (!(tfile instanceof TFile)) return null;
+				const contents = await this.vault.read(tfile);
+				const encoder = new TextEncoder();
+				const hash = await generateHash(encoder.encode(contents).buffer);
+				return { contents, mtime: tfile.stat.mtime, hash };
+			},
+			loadAllStates: async () => {
+				try {
+					return await this._hsmStore.getAllStateMeta();
+				} catch {
+					return [];
+				}
+			},
+			loadState: async (guid: string) => {
+				try {
+					return await this._hsmStore.loadState(guid);
+				} catch {
+					return null;
+				}
+			},
+			onEffect: async (guid, effect) => {
+				this.debug?.(`[MergeManager] Effect for ${guid}:`, effect.type);
+				if (effect.type === "PERSIST_STATE") {
+					this._hsmStore.saveState(guid, effect.state);
+				} else if (effect.type === "SYNC_TO_REMOTE") {
+					// When a file is closed, ProviderIntegration is destroyed so no one
+					// listens for these effects. Handle them at the SharedFolder level.
+					await this.handleIdleSyncToRemote(guid, effect.update);
+				}
+			},
+			getPersistenceMetadata: (guid: string, path: string) => {
+				const s3rn = this.relayId
+					? new S3RemoteDocument(this.relayId, this.guid, guid)
+					: null;
+				return {
+					path,
+					relay: this.relayId || "",
+					appId: this.appId,
+					s3rn: s3rn ? S3RN.encode(s3rn) : "",
+				};
+			},
+			userId: loginManager?.user?.id,
+				yaml: { parse: parseYaml, stringify: stringifyYaml },
+				getAutoResolveConflicts: () => this._autoResolveConflicts,
+			});
+
+		// Create per-folder recording bridge and register with the debug API.
+		this.recordingBridge = new E2ERecordingBridge({
+			onEntry: flags().enableHSMRecording
+				? (entry: HSMLogEntry) => recordHSMEntry(entry)
+				: undefined,
+			getFullPath: (guid: string) => {
+				const file = this.files.get(guid);
+				if (!file || !isDocument(file)) return undefined;
+				return join(this.path, file.path);
+			},
+		});
+		const debugAPI = (globalThis as any).__relayDebug;
+		if (debugAPI?.registerBridge) {
+			const unregister = debugAPI.registerBridge(this.path, this.recordingBridge);
+			this.unsubscribes.push(unregister);
+		}
+		this.mergeManager.setOnTransition((guid, path, info) => {
+			this.recordingBridge.recordTransition(guid, path, info);
+		});
+
+		// Wire folder-level event subscriptions for idle mode remote updates
+		this.setupEventSubscriptions();
+
+		this.whenReady().then(async () => {
 			if (!this.destroyed) {
+				// Bulk-load LCA cache before registering HSMs
+				await this.mergeManager.initialize();
+
 				this.addLocalDocs();
-				this.syncFileTree(this.syncStore);
+				this.syncFileTree();
+
+				// Transition all HSMs to idle mode since no editor is open yet.
+				// HSMs start in 'loading', then receive SET_MODE_IDLE from MergeManager.
+				if (this.mergeManager) {
+					const allGuids = Array.from(this.files.keys());
+					this.mergeManager.setActiveDocuments(new Set(), allGuids);
+				}
 			}
 		});
 
@@ -288,15 +426,316 @@ export class SharedFolder extends HasProvider {
 			}
 		});
 
+		const isAuthoritative = this.authoritative;
 		(async () => {
 			const serverSynced = await this.getServerSynced();
 			if (!serverSynced) {
+				if (isAuthoritative) {
+					await this.markSynced();
+				} else {
+					await this.onceProviderSynced();
+					await this.markSynced();
+				}
+			} else if (!authoritative) {
+				// Even when IDB already has serverSync, we still need the
+				// provider to sync so _providerSynced is set. Without this,
+				// the folder's `synced` getter stays false and downstream
+				// flows (syncFileTree downloads) can fail.
 				await this.onceProviderSynced();
-				await this.markSynced();
 			}
 		})();
 
 		RelayInstances.set(this, this.path);
+	}
+
+	private setupEventSubscriptions() {
+		if (!this._provider || !this.mergeManager) return;
+
+		this._provider.subscribeToEvents(
+			["document.updated"],
+			(event: EventMessage) => {
+				this.handleDocumentUpdateEvent(event);
+			},
+		);
+	}
+
+	private handleDocumentUpdateEvent(event: EventMessage) {
+		if (!this.mergeManager) return;
+
+		const docId = event.doc_id;
+		if (!docId) return;
+
+
+		// Extract the guid from the doc_id
+		// The doc_id format is "{relayId}-{guid}" where both are UUIDs
+		const uuidPattern =
+			"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+		const match = docId.match(
+			new RegExp(`^${uuidPattern}-(${uuidPattern})$`, "i"),
+		);
+		if (!match) return;
+		const guid = match[1];
+
+		if (!this.files.has(guid)) return;
+
+		const file = this.files.get(guid);
+		if (!file || !isDocument(file)) return;
+
+		// Active documents: ProviderIntegration handles sync via y-protocols
+		if (this.mergeManager.isActive(guid)) {
+			return;
+		}
+
+		if (!event.update) return;
+
+		// Normalize update bytes (CBOR decoding may return Buffer or plain object)
+		const update =
+			event.update instanceof Uint8Array
+				? event.update
+				: new Uint8Array(event.update);
+
+		// If a keyframe fetch is in progress, buffer the update
+		const buf = this._pendingKeyframeUpdates.get(guid);
+		if (buf) {
+			buf.push(update);
+			return;
+		}
+
+		const classification = this.mergeManager.classifyUpdate(guid, update);
+		switch (classification) {
+			case 'apply':
+				this.mergeManager.handleRemoteUpdate(guid, update);
+				this.mergeManager.advanceTrackedRemoteSV(guid, update);
+				break;
+			case 'stale':
+				break; // already covered by tracked SV
+			case 'gap':
+				this._fetchKeyframeAndDeliver(file, guid, [update]);
+				break;
+		}
+	}
+
+	/**
+	 * Fetch an HTTP keyframe, then deliver it and the buffered updates.
+	 */
+	private _fetchKeyframeAndDeliver(
+		file: Document,
+		guid: string,
+		pending: Uint8Array[],
+	): void {
+		this._pendingKeyframeUpdates.set(guid, pending);
+		this.backgroundSync.enqueueDownload(file, !flags().enableNewSyncStatus).then((keyframe) => {
+			const buf = this._pendingKeyframeUpdates.get(guid);
+			this._pendingKeyframeUpdates.delete(guid);
+			if (!buf || buf.length === 0) return;
+
+			if (keyframe) {
+				this.mergeManager.handleRemoteUpdate(guid, keyframe);
+				this.mergeManager.seedTrackedRemoteSV(guid, keyframe);
+			}
+
+			for (const u of buf) {
+				const c = this.mergeManager.classifyUpdate(guid, u);
+				if (c === 'apply') {
+					this.mergeManager.handleRemoteUpdate(guid, u);
+					this.mergeManager.advanceTrackedRemoteSV(guid, u);
+				}
+				// 'stale' → drop (subsumed by keyframe)
+				// 'gap' shouldn't happen after a keyframe, but if it does
+				// the update is dropped — the keyframe is the best we have
+			}
+		});
+	}
+
+	/**
+	 * Handle SYNC_TO_REMOTE effect in idle mode.
+	 *
+	 * When a document is in idle mode (file closed), the HSM may still need
+	 * to sync local disk changes to the remote server. This happens when:
+	 * 1. External process modifies the file on disk
+	 * 2. HSM detects the change via polling
+	 * 3. HSM performs idle auto-merge (disk → local CRDT)
+	 * 4. HSM emits SYNC_TO_REMOTE effect
+	 *
+	 * Without this handler, the effect is dropped because ProviderIntegration
+	 * is destroyed when the file is closed.
+	 */
+	private async handleIdleSyncToRemote(
+		guid: string,
+		update: Uint8Array,
+	): Promise<void> {
+		const file = this.files.get(guid);
+		if (!file || !isDocument(file)) {
+			this.warn(
+				`[handleIdleSyncToRemote] Document not found for guid: ${guid}`,
+			);
+			return;
+		}
+
+		// Skip if the editor has the file open — active mode syncs via ProviderIntegration.
+		if (file.userLock) {
+			this.debug?.(
+				`[handleIdleSyncToRemote] Document ${guid} has user lock, skipping`,
+			);
+			return;
+		}
+
+		try {
+			// Apply update to the document's remoteDoc (which is file.ydoc).
+			// This intentionally triggers lazy creation (wake from hibernation).
+			const remoteDoc = file.ensureRemoteDoc();
+			Y.applyUpdate(remoteDoc, update, "local");
+
+			// Also update the HSM's remoteDoc reference so it stays in sync
+			if (file.hsm) {
+				file.hsm.setRemoteDoc(remoteDoc);
+			}
+
+			// The per-document provider is not connected in idle mode, so we
+			// must explicitly sync via backgroundSync to push the update to
+			// the server.
+			await this.backgroundSync.enqueueSync(file);
+			this.log(`[handleIdleSyncToRemote] Synced idle mode update for ${guid}`);
+		} catch (e) {
+			this.warn(
+				`[handleIdleSyncToRemote] Failed to sync update for ${guid}:`,
+				e,
+			);
+		}
+	}
+
+	/**
+	 * Handle WRITE_DISK effect in idle mode.
+	 *
+	 * When a document is in idle mode and receives remote updates, the HSM
+	 * may need to write merged content to disk. This happens when:
+	 * 1. Remote update arrives (from server)
+	 * 2. HSM performs idle auto-merge (remote → local CRDT)
+	 * 3. HSM emits WRITE_DISK effect to update the file on disk
+	 *
+	 * Without this handler, the effect is dropped.
+	 */
+	private async handleIdleWriteDisk(
+		guid: string,
+		contents: string,
+	): Promise<void> {
+		try {
+			// Look up document by guid to get current path (handles renames)
+			const file = this.files.get(guid);
+			if (!file || !isDocument(file)) {
+				this.warn(`[handleIdleWriteDisk] Document not found for guid: ${guid}`);
+				return;
+			}
+
+			const vaultPath = this.getPath(file.path);
+			let tfile = this.vault.getAbstractFileByPath(vaultPath);
+
+			if (tfile instanceof TFile) {
+				await this.vault.modify(tfile, contents);
+			} else {
+				// File doesn't exist on disk yet (new remote file) — create it
+				const normalized = normalizePath(vaultPath);
+				// Ensure parent folders exist
+					const parentPath = normalized.substring(0, normalized.lastIndexOf("/"));
+					if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
+						try {
+							await this.vault.createFolder(parentPath);
+						} catch (_e) {
+							// Concurrent file writes may race to create the same parent folder.
+							// If the folder now exists (created by the other write), continue.
+							if (!this.vault.getAbstractFileByPath(parentPath)) {
+								throw _e;
+							}
+						}
+					}
+				tfile = await this.vault.create(normalized, contents);
+			}
+
+			this.log(`[handleIdleWriteDisk] Wrote merged content to ${vaultPath}`);
+
+		} catch (e) {
+			this.warn(`[handleIdleWriteDisk] Failed to write for guid ${guid}:`, e);
+		}
+	}
+
+	/**
+	 * Handle REQUEST_PROVIDER_SYNC effect for fork reconciliation.
+	 *
+	 * When a fork is created (disk edit in idle mode), the HSM needs remote
+	 * state to reconcile. This handler:
+	 * 1. Downloads latest state from server via backgroundSync
+	 * 2. Applies updates to remoteDoc
+	 * 3. Sends CONNECTED + PROVIDER_SYNCED to HSM
+	 * 4. HSM then runs fork reconciliation
+	 */
+	/**
+	 * Poll for disk changes on all documents in this SharedFolder.
+	 * Only sends DISK_CHANGED if the disk state actually differs from HSM's knowledge.
+	 * Works for all documents regardless of hibernation state.
+	 *
+	 * @param guids - Optional set of GUIDs to poll. If not provided, polls all documents.
+	 */
+	async poll(guids?: string[]): Promise<void> {
+		const targetGuids = guids ?? Array.from(this.files.keys());
+
+		for (const guid of targetGuids) {
+			const file = this.files.get(guid);
+			if (!file || !isDocument(file)) continue;
+
+			const hsm = file.hsm;
+			if (!hsm) continue;
+
+			// Check disk state
+			try {
+				const diskState = await file.readDiskContent();
+				const currentDisk = hsm.state.disk;
+
+				if (this.shouldSendDiskChanged(currentDisk, diskState)) {
+					hsm.send({
+						type: "DISK_CHANGED",
+						contents: diskState.content,
+						mtime: diskState.mtime,
+						hash: diskState.hash,
+					});
+				}
+			} catch (e) {
+				// File might have been deleted - ignore
+				this.debug?.(
+					`[poll] Failed to read disk state for ${guid}:`,
+					e,
+				);
+			}
+
+			// Connect forked documents awaiting provider sync
+			if (
+				hsm.state.fork !== null
+				&& hsm.matches("idle.localAhead")
+				&& !file.hasProviderIntegration()
+				&& this.shouldConnect
+			) {
+				file.connectForForkReconcile().catch(() => {});
+			}
+		}
+	}
+
+	/**
+	 * Determine if DISK_CHANGED event should be sent based on current vs new disk state.
+	 * Returns true if disk state has changed, false if unchanged.
+	 */
+	private shouldSendDiskChanged(
+		currentDisk: { hash: string; mtime: number } | null,
+		newDiskState: { mtime: number; hash: string },
+	): boolean {
+		// No current disk state - always send
+		if (!currentDisk) return true;
+
+		// Compare mtime first (fast check)
+		if (currentDisk.mtime !== newDiskState.mtime) return true;
+
+		// Compare hash as fallback (handles clock skew edge cases)
+		if (currentDisk.hash !== newDiskState.hash) return true;
+
+		return false;
 	}
 
 	private addLocalDocs = () => {
@@ -402,10 +841,51 @@ export class SharedFolder extends HasProvider {
 		this._shouldConnect = connect;
 	}
 
+	public get localOnly(): boolean {
+		return this._localOnly;
+	}
+
+	public set localOnly(value: boolean) {
+		if (this._localOnly === value) return;
+		this._localOnly = value;
+		this._settings.update((current) => ({
+			...current,
+			localOnly: value,
+		}));
+		const guids = Array.from(this.files.keys());
+		this.mergeManager?.setLocalOnly(guids, value);
+	}
+
+	public get autoResolveConflicts(): 'none' | 'remote' | 'local' | 'latest' | 'same-user' {
+		return this._autoResolveConflicts;
+	}
+
+	public set autoResolveConflicts(value: 'none' | 'remote' | 'local' | 'latest' | 'same-user') {
+		if (this._autoResolveConflicts === value) return;
+		this._autoResolveConflicts = value;
+		this._settings.update((current) => ({
+			...current,
+			autoResolveConflicts: value,
+		}));
+	}
+
+	public get diskWriteDebounceMs(): number {
+		return this._diskWriteDebounceMs;
+	}
+
+	public set diskWriteDebounceMs(value: number) {
+		if (this._diskWriteDebounceMs === value) return;
+		this._diskWriteDebounceMs = value;
+		this._settings.update((current) => ({
+			...current,
+			diskWriteDebounceMs: value,
+		}));
+	}
+
 	async netSync() {
 		await this.whenReady();
 		this.addLocalDocs();
-		await this.syncFileTree(this.syncStore);
+		await this.syncFileTree();
 		this.backgroundSync.enqueueSharedFolderSync(this);
 	}
 
@@ -414,16 +894,26 @@ export class SharedFolder extends HasProvider {
 	}
 
 	async sync() {
-		await this.syncFileTree(this.syncStore);
+		await this.syncFileTree();
 	}
 
-	connect(): Promise<boolean> {
+	async connect(): Promise<boolean> {
 		if (this.s3rn instanceof S3RemoteFolder) {
 			if (this.connected || this.shouldConnect) {
-				return super.connect();
+				const result = await super.connect();
+				if (result && this.mergeManager) {
+					// Clear tracked SVs so the first event on this connection
+					// triggers an HTTP full-sync to establish a baseline.
+					// The provider preserves eventCallbacks across reconnects
+					// and re-sends the server subscribe frame itself, so the
+					// callbacks registered by the constructor's
+					// setupEventSubscriptions() call stay live.
+					this.mergeManager.clearTrackedRemoteSVs();
+				}
+				return result;
 			}
 		}
-		return Promise.resolve(false);
+		return false;
 	}
 
 	public get name(): string {
@@ -432,6 +922,33 @@ export class SharedFolder extends HasProvider {
 
 	public get location(): string {
 		return this.path.split("/").slice(0, -1).join("/");
+	}
+
+	private _buildPendingUploadKey(relayId?: string): string {
+		const base = `${this.appId}-system3-relay/folders/${this.guid}/pendingUploads`;
+		return relayId ? `${base}/${relayId}` : base;
+	}
+
+	private _onRelayChanged(newRelayId: string) {
+		this.pendingUpload = new LocalStorage<string>(
+			this._buildPendingUploadKey(newRelayId),
+		);
+		this.syncStore.pendingUpload = this.pendingUpload;
+
+		try {
+			const syncFiles = this.getSyncFiles();
+			syncFiles.forEach((tfile) => {
+				if (!(tfile instanceof TFile)) return;
+				const vpath = this.getVirtualPath(tfile.path);
+				if (!this.pendingUpload.has(vpath)) {
+					const guid = this.syncStore.get(vpath) ?? uuidv4();
+					this.pendingUpload.set(vpath, guid);
+				}
+			});
+			this.log(`[relay migration] re-queued ${this.pendingUpload.size} local files for new relay ${newRelayId}`);
+		} catch (e) {
+			this.warn("[relay migration] failed to re-queue pending uploads", e);
+		}
 	}
 
 	public get remote(): RemoteSharedFolder | undefined {
@@ -449,6 +966,7 @@ export class SharedFolder extends HasProvider {
 		if (this._remote === value) {
 			return;
 		}
+		const prevRelayId = this.relayId;
 		this._remote = value;
 		this.relayId = value?.relay?.guid;
 		this.s3rn = this.relayId
@@ -471,6 +989,9 @@ export class SharedFolder extends HasProvider {
 		}
 
 		this.server = value?.relay.providerId;
+		if (this.relayId && this.relayId !== prevRelayId) {
+			this._onRelayChanged(this.relayId);
+		}
 		this.notifyListeners();
 	}
 
@@ -556,6 +1077,8 @@ export class SharedFolder extends HasProvider {
 	public get intent(): ConnectionIntent {
 		return this.shouldConnect ? "connected" : "disconnected";
 	}
+
+
 
 	async _handleServerRename(
 		doc: IFile,
@@ -653,12 +1176,12 @@ export class SharedFolder extends HasProvider {
 			}
 
 			// Check for GUID mismatch - file exists but not mapped to remote GUID
-			if (!file && isSyncFileMeta(meta)) {
+			if (!file) {
 				const localGuid = this.syncStore.get(path);
 				const localFile = localGuid ? this.files.get(localGuid) : null;
 
-				if (localGuid && localFile && isSyncFile(localFile)) {
-					// We have a local file with different GUID - check if content matches
+				if (localGuid && localFile && isSyncFile(localFile) && isSyncFileMeta(meta)) {
+					// SyncFile with different GUID - check if content matches
 					const promise = this.remapIfHashMatches(
 						localFile,
 						localGuid,
@@ -666,6 +1189,97 @@ export class SharedFolder extends HasProvider {
 						path,
 						meta,
 					);
+					return { op: "update", path, promise };
+				}
+
+				if (localGuid && localFile && isDocument(localFile) && isDocumentMeta(meta)) {
+					// Document with different GUID — the local CRDT (under the
+					// old GUID) has independent history from the server's CRDT
+					// and cannot be merged. Download the server's content
+					// first (non-destructive), then destroy the old Document
+					// and create a fresh one under the server's GUID populated
+					// from the downloaded bytes. Disk stays untouched; if it
+					// differs from remote, poll() triggers DISK_CHANGED and
+					// the normal fork / fork-reconcile path pushes the diff
+					// upstream.
+					const promise = (async () => {
+						// Offline: defer. Next meta event retries on reconnect.
+						if (!this.connected) {
+							this.log(
+								`[${path}] remap deferred: folder offline`,
+							);
+							return;
+						}
+
+						// 1. Download remote CRDT first. Non-destructive — if
+						// this fails, old state is intact and the next meta
+						// event can retry.
+						let updateBytes: Uint8Array | undefined;
+						try {
+							updateBytes = await this.backgroundSync.downloadByGuid(
+								this,
+								guid,
+								path,
+							);
+						} catch (e) {
+							this.warn(
+								`[${path}] remap download failed, deferring`,
+								e,
+							);
+							return;
+						}
+
+						// SharedFolder may have been destroyed or the old
+						// doc removed during the await. Bail out — state has
+						// moved on without us. This also handles concurrent
+						// meta events racing into the same remap.
+						if (
+							this.destroyed ||
+							!this.files.has(localGuid)
+						) {
+							this.log(
+								`[${path}] remap aborted: state changed during download`,
+							);
+							return;
+						}
+
+						// 2. Tear down old Document.
+						this.files.delete(localGuid);
+						this.fset.delete(localFile);
+						localFile.cleanup();
+						localFile.destroy();
+
+						try {
+							indexedDB.deleteDatabase(
+								`${this.appId}-relay-doc-${localGuid}`,
+							);
+						} catch {}
+						const p = this._hsmStore
+							.deleteState(localGuid)
+							.catch(() => {});
+						awaitOnReload(p);
+
+						this.syncStore.pendingUpload.delete(path);
+
+						// 3. Create fresh Document under the server's GUID.
+						const newDoc = this.getOrCreateDoc(guid, path);
+						this.files.set(guid, newDoc);
+						this.fset.add(newDoc, true);
+
+						// 4. Enroll remote content (if any) and start the HSM.
+						// If the server has the guid but no content yet,
+						// `updateBytes` is undefined and the HSM starts with
+						// no LCA; provider sync will deliver content later.
+						if (updateBytes) {
+							await newDoc.hsm!.initializeFromRemote(updateBytes);
+						}
+						await this.poll([guid]);
+
+						this.log(
+							`Remapped Document ${path} from local GUID ${localGuid} to remote GUID ${guid}`,
+						);
+					})();
+
 					return { op: "update", path, promise };
 				}
 			}
@@ -750,6 +1364,15 @@ export class SharedFolder extends HasProvider {
 		remotePaths: string[],
 		diffLog: string[],
 	): Delete[] {
+		// SAFETY: If the remote has zero registered paths, this is either a brand-new
+		// empty server or a server that has never received these files. Treating an
+		// empty remote as "everything was remotely deleted" causes catastrophic local
+		// data loss when switching relay servers. Skip cleanup entirely — the upload
+		// path (addLocalDocs / pendingUpload) will re-upload the local files.
+		if (remotePaths.length === 0) {
+			return [];
+		}
+
 		// Delete files that are no longer shared
 		const ffiles = this.getSyncFiles();
 		const deletes: Delete[] = [];
@@ -779,6 +1402,21 @@ export class SharedFolder extends HasProvider {
 		};
 		files.forEach(sync);
 		folders.forEach(sync);
+
+		// CIRCUIT BREAKER: if we would delete more than 50% of local syncable files
+		// in a single sync cycle, something catastrophic is happening (server migration,
+		// relay reset, or reconnect to a server with a different file set). Abort all
+		// deletions to prevent mass data loss. Legitimate remote deletions are rare
+		// and almost never affect more than a handful of files at once.
+		const totalSyncable = files.filter((f) => this.isSyncableTFile(f)).length;
+		if (deletes.length > 0 && deletes.length >= Math.max(3, totalSyncable * 0.5)) {
+			diffLog.push(
+				`WARN: circuit breaker — aborted ${deletes.length} deletions (${totalSyncable} local files). ` +
+				`Too many at once; use bulk-resolve or manually remove files instead.`,
+			);
+			return [];
+		}
+
 		return deletes;
 	}
 
@@ -799,7 +1437,7 @@ export class SharedFolder extends HasProvider {
 		});
 	}
 
-	syncFileTree(syncStore: SyncStore): Promise<void> {
+	syncFileTree(): Promise<void> {
 		// If a sync is already running, mark that we want another sync after
 		if (this.syncFileTreePromise) {
 			this.syncRequestedDuringSync = true;
@@ -807,7 +1445,7 @@ export class SharedFolder extends HasProvider {
 			promise.then(() => {
 				if (this.syncRequestedDuringSync) {
 					this.syncRequestedDuringSync = false;
-					return this.syncFileTree(syncStore);
+					return this.syncFileTree();
 				}
 			});
 			return promise;
@@ -821,12 +1459,12 @@ export class SharedFolder extends HasProvider {
 				this.ydoc.transact(async () => {
 					// Sync folder operations first because renames/moves also affect files
 					this.syncStore.migrateUp();
-					this.syncByType(syncStore, diffLog, ops, [SyncType.Folder]);
+					this.syncByType(this.syncStore, diffLog, ops, [SyncType.Folder]);
 				}, this);
 				await Promise.all(ops.map((op) => op.promise));
 				this.ydoc.transact(async () => {
 					this.syncByType(
-						syncStore,
+						this.syncStore,
 						diffLog,
 						ops,
 						this.syncStore.typeRegistry.getEnabledFileSyncTypes(),
@@ -1268,6 +1906,15 @@ export class SharedFolder extends HasProvider {
 			throw new Error("unexpected ifile type");
 		}
 		doc.move(vpath, this);
+
+		// Document creates its own HSM via ensureHSM() - no need to register separately.
+		// Just ensure the HSM exists after the move.
+		doc.ensureHSM();
+
+		if (this._localOnly && doc.hsm) {
+			doc.hsm.setLocalOnly(true);
+		}
+
 		return doc;
 	}
 
@@ -1283,9 +1930,30 @@ export class SharedFolder extends HasProvider {
 			throw new Error(`called download on item that is not in ids ${vpath}`);
 		}
 		const doc = this.getOrCreateDoc(guid, vpath);
-		doc.markOrigin("remote");
 
-		this.backgroundSync.enqueueDownload(doc);
+		// Download via queue — returns raw CRDT bytes applied to remoteDoc
+		const updateBytes = await this.backgroundSync.enqueueDownload(doc);
+
+		if (updateBytes) {
+			await doc.hsm?.initializeFromRemote(updateBytes);
+
+			if (this.syncStore.has(doc.path)) {
+				// doc.text reads from doc.ydoc (remoteDoc), which may be null/empty
+				// when the doc hasn't connected to the provider yet (isRemoteDocLoaded=false).
+				// Decode from updateBytes as the authoritative fallback so the file
+				// always lands on disk with real content — preventing Templater (or any
+				// folder-template plugin) from seeing an empty file and overwriting it.
+				let content = doc.text;
+				if (!content) {
+					const tmpDoc = new Y.Doc();
+					Y.applyUpdate(tmpDoc, updateBytes);
+					content = tmpDoc.getText("contents").toString();
+					tmpDoc.destroy();
+				}
+				await this.flush(doc, content);
+				await doc.hsm?.setLCA();
+			}
+		}
 
 		this.files.set(guid, doc);
 		this.fset.add(doc, update);
@@ -1306,27 +1974,19 @@ export class SharedFolder extends HasProvider {
 		}
 		const doc = this.getOrCreateDoc(guid, vpath);
 
-		const originPromise = doc.getOrigin();
-		const awaitingUpdatesPromise = this.awaitingUpdates();
-
 		(async () => {
-			const exists = await this.exists(doc);
+			const [exists, awaitingUpdates] = await Promise.all([
+				this.exists(doc),
+				this.awaitingUpdates(),
+			]);
 			if (!exists) {
 				throw new Error(`Upload failed, doc does not exist at ${vpath}`);
 			}
-			const [contents, origin, awaitingUpdates] = await Promise.all([
-				this.read(doc),
-				originPromise,
-				awaitingUpdatesPromise,
-			]);
-			const text = doc.ydoc.getText("contents");
-			if (!awaitingUpdates && origin === undefined) {
-				this.log(`[${doc.path}] No Known Peers: Syncing file into ytext.`);
-				this.ydoc.transact(() => {
-					text.insert(0, contents);
-				}, this._persistence);
-				doc.markOrigin("local");
-				this.log(`[${doc.path}] Uploading file`);
+			if (!awaitingUpdates) {
+				// HSM handles enrollment check and lazy disk loading internally.
+				// initializeWithContent() checks origin in one IDB session, only reads
+				// disk if not already enrolled, and sets origin atomically.
+				await doc.hsm?.initializeWithContent();
 				await this.backgroundSync.enqueueSync(doc);
 				this.markUploaded(doc);
 			}
@@ -1354,7 +2014,7 @@ export class SharedFolder extends HasProvider {
 			this.whenReady().then(async () => {
 				const synced = await doc.getServerSynced();
 				if (doc.tfile?.stat.size === 0 && !synced) {
-					this.backgroundSync.enqueueDownload(doc);
+					this.backgroundSync.enqueueDownload(doc, !flags().enableNewSyncStatus);
 				} else if (this.pendingUpload.get(doc.path)) {
 					this.backgroundSync.enqueueSync(doc);
 				}
@@ -1551,17 +2211,35 @@ export class SharedFolder extends HasProvider {
 	}
 
 	deleteFile(vpath: string) {
+		this.pendingUpload.delete(vpath);
 		const guid = this.syncStore?.get(vpath);
 		if (guid) {
 			this.ydoc.transact(() => {
 				this.syncStore.delete(vpath);
 				const doc = this.files.get(guid);
 				if (doc) {
-					doc.cleanup();
 					this.fset.delete(doc);
+					this.files.delete(guid);
+					doc.cleanup();
+					doc.destroy();
 				}
-				this.files.delete(guid);
 			}, this);
+			indexedDB.deleteDatabase(`${this.appId}-relay-doc-${guid}`);
+			const p = this._hsmStore.deleteState(guid).catch(() => {});
+			awaitOnReload(p);
+		} else {
+			// syncStore entry already gone (remote delete) - find by path
+			const doc = this.fset.find((f) => f.path === vpath);
+			if (doc) {
+				const docGuid = doc.guid;
+				this.fset.delete(doc);
+				this.files.delete(docGuid);
+				doc.cleanup();
+				doc.destroy();
+				indexedDB.deleteDatabase(`${this.appId}-relay-doc-${docGuid}`);
+				const p = this._hsmStore.deleteState(docGuid).catch(() => {});
+				awaitOnReload(p);
+			}
 		}
 	}
 
@@ -1644,23 +2322,76 @@ export class SharedFolder extends HasProvider {
 		}
 	}
 
+	onDestroy(cb: () => void): void {
+		if (this.destroyed) {
+			try { cb(); } catch { /* caller's problem */ }
+			return;
+		}
+		this.unsubscribes.push(cb);
+	}
+
+	/**
+	 * Reset all persisted HSM state for this folder.
+	 *
+	 * Wipes all LCA, fork, and deferredConflict records from the HSMStore so
+	 * that HSMs reinitialize from a clean baseline on next file open.  Also
+	 * clears MergeManager's in-memory LCA and state-vector caches so stale
+	 * metadata doesn't persist in RAM after the IDB wipe.
+	 *
+	 * Use case: after upgrading from 0.7.5 → 0.8.x, previously-resolved
+	 * conflicts can re-appear because the HSM state store was not migrated.
+	 * Calling this method gives the team a "clear slate" without losing any
+	 * actual document content.
+	 */
+	async resetHSMState(): Promise<void> {
+		await this._hsmStore.clearAllData();
+		this.mergeManager?.clearPersistedStateForFolder();
+	}
+
+	/**
+	 * Bulk-resolve all conflicted documents in this folder.
+	 *
+	 * @param side - 'local' = accept disk content for each conflict;
+	 *               'remote' = accept CRDT/server content for each conflict.
+	 * @returns Counts of resolved and failed documents.
+	 */
+	async bulkResolveConflicts(
+		side: 'local' | 'remote',
+	): Promise<{ resolved: number; skipped: number; failed: number }> {
+		if (!this.mergeManager) return { resolved: 0, skipped: 0, failed: 0 };
+		const guids = Array.from(this.files.keys());
+		return this.mergeManager.resolveAllConflicts(guids, side);
+	}
+
 	destroy() {
 		this.destroyed = true;
 		this.unsubscribes.forEach((unsub) => {
 			unsub();
 		});
+
 		this.files.forEach((doc: IFile) => {
 			doc.destroy();
 			this.files.delete(doc.guid);
 		});
+
+		this.recordingBridge?.dispose();
 		this.syncStore.destroy();
 		this.syncSettingsManager.destroy();
+		this.mergeManager?.destroy();
+		// IndexeddbPersistence self-destructs on the ydoc's 'destroy' event,
+		// but its async teardown promise (awaiting pending writes and
+		// compaction before closing the DB) is dropped inside that event
+		// handler. Capture it here so awaitOnReload holds plugin re-enable
+		// until IDB has flushed. Calling destroy() removes the 'destroy'
+		// listener synchronously, so super.destroy() below won't double-fire.
+		if (this._persistence) {
+			const p = this._persistence.destroy().catch(() => {});
+			awaitOnReload(p);
+		}
 		super.destroy();
-		this.ydoc.destroy();
 		this.fset.clear();
 		this._settings.destroy();
 		this._settings = null as any;
-		this.diskBufferStore = null as any;
 		this.relayManager = null as any;
 		this.backgroundSync = null as any;
 		this.loginManager = null as any;
@@ -1668,12 +2399,14 @@ export class SharedFolder extends HasProvider {
 		this.fileManager = null as any;
 		this.syncStore = null as any;
 		this.syncSettingsManager = null as any;
+		this.mergeManager = null as any;
 		this.whenSyncedPromise?.destroy();
 		this.whenSyncedPromise = null as any;
 		this.readyPromise?.destroy();
 		this.readyPromise = null as any;
 		this.syncFileTreePromise?.destroy();
 		this.syncFileTreePromise = null as any;
+
 	}
 }
 
@@ -1682,7 +2415,7 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 		path: string,
 		guid: string,
 		relayId?: string,
-		awaitingUpdates?: boolean,
+		authoritative?: boolean,
 	) => SharedFolder;
 	private _offRemoteUpdates?: () => void;
 
@@ -1693,9 +2426,10 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 			path: string,
 			guid: string,
 			relayId?: string,
-			awaitingUpdates?: boolean,
+			authoritative?: boolean,
 		) => SharedFolder,
 		private settings: NamespacedSettings<SharedFolderSettings[]>,
+		private _hsmStore: HSMStore,
 	) {
 		super();
 		this.folderBuilder = folderBuilder;
@@ -1720,11 +2454,26 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 	}
 
 	public delete(item: SharedFolder): boolean {
+		// Collect IDB database names before destroy nulls references
+		const dbNames: string[] = [];
+		if (item) {
+			item.files.forEach((doc: IFile) => {
+				dbNames.push(`${item.appId}-relay-doc-${doc.guid}`);
+			});
+			dbNames.push(item.guid);
+		}
 		item?.destroy();
 		const deleted = super.delete(item);
 		this.settings.update((current) => {
 			return current.filter((settings) => settings.guid !== item.guid);
 		});
+		// Delete IDB databases after in-memory objects are destroyed
+		for (const name of dbNames) {
+			indexedDB.deleteDatabase(name);
+		}
+		// Delete folder-level index from global HSM database
+		const p = this._hsmStore.deleteIndex(item.guid).catch(() => {});
+		awaitOnReload(p);
 		return deleted;
 	}
 
@@ -1753,9 +2502,7 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 		if (this._offRemoteUpdates) {
 			this._offRemoteUpdates();
 		}
-		this.unsubscribes.forEach((unsub) => {
-			unsub();
-		});
+		super.destroy();
 		this.relayManager = null as any;
 		this.folderBuilder = null as any;
 	}
@@ -1767,13 +2514,30 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 	private _load(folders: SharedFolderSettings[]) {
 		let updated = false;
 		folders.forEach((folder: SharedFolderSettings) => {
+			// Validate required fields
+			if (!folder.path) {
+				this.warn(`Invalid settings: folder missing path, skipping`);
+				return;
+			}
+			if (!folder.guid || !S3RN.validateUUID(folder.guid)) {
+				this.warn(
+					`Invalid settings: folder "${folder.path}" has invalid guid "${folder.guid}", skipping`,
+				);
+				return;
+			}
 			const tFolder = this.vault.getFolderByPath(folder.path);
 			if (!tFolder) {
 				this.warn(`Invalid settings, ${folder.path} does not exist`);
 				return;
 			}
-			this._new(folder.path, folder.guid, folder?.relay);
-			updated = true;
+			try {
+				this._new(folder.path, folder.guid, folder?.relay);
+				updated = true;
+			} catch (e) {
+				this.warn(
+					`Failed to load folder "${folder.path}": ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
 		});
 
 		if (updated) {
@@ -1785,8 +2549,21 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 		path: string,
 		guid: string,
 		relayId?: string,
-		awaitingUpdates?: boolean,
+		authoritative?: boolean,
 	): SharedFolder {
+		// Validate inputs
+		if (!path) {
+			throw new Error("Cannot create shared folder: path is required");
+		}
+		if (!guid || !S3RN.validateUUID(guid)) {
+			throw new Error(`Cannot create shared folder: invalid guid "${guid}"`);
+		}
+		if (relayId && !S3RN.validateUUID(relayId)) {
+			throw new Error(
+				`Cannot create shared folder: invalid relayId "${relayId}"`,
+			);
+		}
+
 		const existing = this.find(
 			(folder) => folder.path == path && folder.guid == guid,
 		);
@@ -1801,13 +2578,22 @@ export class SharedFolders extends ObservableSet<SharedFolder> {
 		if (samePath) {
 			throw new Error("Conflict: Tracked folder exists at this location.");
 		}
-		const folder = this.folderBuilder(path, guid, relayId, awaitingUpdates);
+		const folder = this.folderBuilder(path, guid, relayId, authoritative);
 		this._set.add(folder);
 		return folder;
 	}
 
-	new(path: string, guid: string, relayId?: string, awaitingUpdates?: boolean) {
-		const folder = this._new(path, guid, relayId, awaitingUpdates);
+	/** Share a local folder — user is authoritative (source of truth). */
+	init(path: string, relayId?: string): SharedFolder {
+		const guid = uuidv4();
+		const folder = this._new(path, guid, relayId, true);
+		this.notifyListeners();
+		return folder;
+	}
+
+	/** Download a remote folder — server is authoritative. */
+	clone(path: string, guid: string, relayId?: string): SharedFolder {
+		const folder = this._new(path, guid, relayId, false);
 		this.notifyListeners();
 		return folder;
 	}

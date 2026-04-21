@@ -31,6 +31,7 @@ export class Canvas extends HasProvider implements IFile, HasMimeType {
 	_tfile: TFile | null;
 	name: string;
 	userLock: boolean = false;
+	destroyed: boolean = false;
 	extension: string;
 	basename: string;
 	vault: Vault;
@@ -182,8 +183,8 @@ export class Canvas extends HasProvider implements IFile, HasMimeType {
 	async awaitingUpdates(): Promise<boolean> {
 		await this.whenSynced();
 		await this.getServerSynced();
-		if (!this._awaitingUpdates) {
-			return false;
+		if (this._awaitingUpdates !== undefined) {
+			return this._awaitingUpdates;
 		}
 		this._awaitingUpdates = !this.hasLocalDB();
 		return this._awaitingUpdates;
@@ -238,6 +239,20 @@ export class Canvas extends HasProvider implements IFile, HasMimeType {
 				return [this.persistenceSynced, undefined];
 			});
 		return this.whenSyncedPromise.getPromise();
+	}
+
+	/**
+	 * Release lock on this canvas.
+	 * Transitions HSM from active back to idle mode.
+	 * Call this when editor closes (replaces userLock = false).
+	 */
+	releaseLock(): void {
+		this.userLock = false;
+
+		const mergeManager = this.sharedFolder.mergeManager;
+		if (mergeManager) {
+			mergeManager.unload(this.guid);
+		}
 	}
 
 	public get sharedFolder(): SharedFolder {
@@ -370,6 +385,7 @@ export class Canvas extends HasProvider implements IFile, HasMimeType {
 	}
 
 	destroy() {
+		this.destroyed = true;
 		this.unsubscribes.forEach((unsubscribe) => {
 			unsubscribe();
 		});

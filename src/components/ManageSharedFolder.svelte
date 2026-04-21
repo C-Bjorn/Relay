@@ -4,7 +4,7 @@
 	import SettingGroup from "./SettingGroup.svelte";
 	import type Live from "src/main";
 	import { type SharedFolder } from "src/SharedFolder";
-	import { debounce } from "obsidian";
+	import { debounce, Notice } from "obsidian";
 	import { createEventDispatcher, onDestroy, onMount } from "svelte";
 	import Breadcrumbs from "./Breadcrumbs.svelte";
 
@@ -12,6 +12,42 @@
 	export let sharedFolder: SharedFolder;
 
 	const dispatch = createEventDispatcher();
+
+	// ── per-folder auto-resolve setting ─────────────────────────────────────
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest' | 'same-user';
+
+	let autoResolve: AutoResolve = sharedFolder?.autoResolveConflicts ?? 'none';
+
+	function onAutoResolveChange() {
+		if (sharedFolder) {
+			sharedFolder.autoResolveConflicts = autoResolve;
+		}
+	}
+
+	// ── disk write debounce setting ──────────────────────────────────────────
+	let diskDebounceMs: number = sharedFolder?.diskWriteDebounceMs ?? 1000;
+
+	function onDiskDebounceChange() {
+		if (sharedFolder) {
+			sharedFolder.diskWriteDebounceMs = diskDebounceMs;
+		}
+	}
+
+	// ── Fix 5: reset HSM state ───────────────────────────────────────────────
+	let resetting = false;
+
+	async function handleResetSyncState() {
+		if (!sharedFolder || resetting) return;
+		resetting = true;
+		try {
+			await sharedFolder.resetHSMState();
+			new Notice(`Relay: Sync state reset for "${sharedFolder.path}". Re-open files to apply.`);
+		} catch (e) {
+			new Notice(`Relay: Failed to reset sync state: ${e}`);
+		} finally {
+			resetting = false;
+		}
+	}
 
 	async function handleDeleteMetadata() {
 		if (sharedFolder) {
@@ -52,6 +88,53 @@
 </div>
 
 {#if sharedFolder}
+	<!-- Conflict resolution + disk write settings -->
+	<SettingItemHeading name="Sync settings"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Conflict resolution"
+			description="When a conflict is detected — which version wins automatically? 'Prefer Latest' accepts whichever side was modified most recently."
+		>
+			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
+				<option value="none">Manual — show conflict UI</option>
+				<option value="remote">Prefer Remote — always accept server/editor state</option>
+				<option value="local">Prefer Local — always accept disk/external writes</option>
+				<option value="latest">Prefer Latest — accept most recent</option>
+				<option value="same-user">Same User — skip conflicts when remote author is you</option>
+			</select>
+		</SettingItem>
+		<SettingItem
+			name="Disk write delay"
+			description="Quiet period after a file is written before Relay syncs it. Increase for folders written by external tools (MegaMem, Claude Code) to absorb rapid write chains. Default: 1 second."
+		>
+			<select bind:value={diskDebounceMs} on:change={onDiskDebounceChange}>
+				<option value={0}>Off — sync immediately</option>
+				<option value={500}>Fast — 0.5 seconds</option>
+				<option value={1000}>Standard — 1 second (default)</option>
+				<option value={3000}>Relaxed — 3 seconds</option>
+				<option value={30000}>Slow — 30 seconds</option>
+			</select>
+		</SettingItem>
+	</SettingGroup>
+
+	<!-- Fix 5: Reset sync state -->
+	<SettingItemHeading name="Maintenance"></SettingItemHeading>
+	<SettingGroup>
+		<SettingItem
+			name="Reset sync state"
+			description="Clears all persisted merge history (LCA, fork, deferred conflicts) for this folder. Use this after an upgrade if previously-resolved conflicts keep reappearing. Document content is not affected."
+		>
+			<button
+				disabled={resetting}
+				on:click={debounce(() => {
+					handleResetSyncState();
+				})}
+			>
+				{resetting ? "Resetting…" : "Reset sync state"}
+			</button>
+		</SettingItem>
+	</SettingGroup>
+
 	<SettingItemHeading name="Danger zone"></SettingItemHeading>
 	<SettingGroup>
 		<SettingItem
