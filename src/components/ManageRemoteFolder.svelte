@@ -127,7 +127,7 @@
 		$folderStore?.syncSettingsManager;
 
 	// ── per-folder auto-resolve setting ────────────────────────────────────
-	type AutoResolve = 'none' | 'remote' | 'local' | 'latest';
+	type AutoResolve = 'none' | 'remote' | 'local' | 'latest' | 'same-user';
 	let autoResolve: AutoResolve = $folderStore?.autoResolveConflicts ?? 'none';
 
 	function onAutoResolveChange() {
@@ -632,11 +632,12 @@
 			description="When a conflict is detected — which version wins automatically? 'Prefer Latest' accepts whichever side was modified most recently."
 		>
 			<select bind:value={autoResolve} on:change={onAutoResolveChange}>
-				<option value="none">Manual — show conflict UI</option>
-				<option value="remote">Prefer Remote — accept server/editor state</option>
-				<option value="local">Prefer Local — accept external writes</option>
-				<option value="latest">Prefer Latest — accept most recent</option>
-			</select>
+					<option value="none">Manual — show conflict UI</option>
+					<option value="remote">Prefer Remote — accept server/editor state</option>
+					<option value="local">Prefer Local — accept external writes</option>
+					<option value="latest">Prefer Latest — accept most recent</option>
+					<option value="same-user">Same User — skip conflicts when remote author is you</option>
+				</select>
 		</SettingItem>
 		<SettingItem
 			name="Disk write delay"
