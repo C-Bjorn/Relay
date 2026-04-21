@@ -217,7 +217,7 @@ export class SharedFolder extends HasProvider {
 		this.files = new Map();
 		this.fset = new Files();
 		this.pendingUpload = new LocalStorage<string>(
-			`${appId}-system3-relay/folders/${this.guid}/pendingUploads`,
+			this._buildPendingUploadKey(relayId),
 		);
 		this.pendingUpload.forEach((guid, vpath) => {
 			if (!this.existsSync(vpath)) {
@@ -924,6 +924,33 @@ export class SharedFolder extends HasProvider {
 		return this.path.split("/").slice(0, -1).join("/");
 	}
 
+	private _buildPendingUploadKey(relayId?: string): string {
+		const base = `${this.appId}-system3-relay/folders/${this.guid}/pendingUploads`;
+		return relayId ? `${base}/${relayId}` : base;
+	}
+
+	private _onRelayChanged(newRelayId: string) {
+		this.pendingUpload = new LocalStorage<string>(
+			this._buildPendingUploadKey(newRelayId),
+		);
+		this.syncStore.pendingUpload = this.pendingUpload;
+
+		try {
+			const syncFiles = this.getSyncFiles();
+			syncFiles.forEach((tfile) => {
+				if (!(tfile instanceof TFile)) return;
+				const vpath = this.getVirtualPath(tfile.path);
+				if (!this.pendingUpload.has(vpath)) {
+					const guid = this.syncStore.get(vpath) ?? uuidv4();
+					this.pendingUpload.set(vpath, guid);
+				}
+			});
+			this.log(`[relay migration] re-queued ${this.pendingUpload.size} local files for new relay ${newRelayId}`);
+		} catch (e) {
+			this.warn("[relay migration] failed to re-queue pending uploads", e);
+		}
+	}
+
 	public get remote(): RemoteSharedFolder | undefined {
 		try {
 			// FIXME: race condition because sharedFolder doesn't use postie
@@ -939,6 +966,7 @@ export class SharedFolder extends HasProvider {
 		if (this._remote === value) {
 			return;
 		}
+		const prevRelayId = this.relayId;
 		this._remote = value;
 		this.relayId = value?.relay?.guid;
 		this.s3rn = this.relayId
@@ -961,6 +989,9 @@ export class SharedFolder extends HasProvider {
 		}
 
 		this.server = value?.relay.providerId;
+		if (this.relayId && this.relayId !== prevRelayId) {
+			this._onRelayChanged(this.relayId);
+		}
 		this.notifyListeners();
 	}
 
