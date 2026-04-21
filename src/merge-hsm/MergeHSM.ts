@@ -2427,24 +2427,16 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 	 * or no clientID→userId mapping exists for the contributing clients.
 	 */
 	private getRemoteAuthorUserIds(lcaStateVector: Uint8Array): Set<string> {
-		if (!this.remoteDoc) {
-			this.idleMergeLog('[same-user] getRemoteAuthorUserIds: no remoteDoc');
-			return new Set();
-		}
+		if (!this.remoteDoc) return new Set();
 		const updateSinceLCA = Y.encodeStateAsUpdate(this.remoteDoc, lcaStateVector);
-		this.idleMergeLog(`[same-user] updateSinceLCA byteLength=${updateSinceLCA.byteLength}`);
 		// byteLength <= 2 means the update encoder wrote only a header with no structs
-		if (updateSinceLCA.byteLength <= 2) {
-			this.idleMergeLog('[same-user] getRemoteAuthorUserIds: empty update since LCA');
-			return new Set();
-		}
+		if (updateSinceLCA.byteLength <= 2) return new Set();
 
 		// Apply to a throwaway doc to enumerate which clientIDs contributed ops.
 		const throwaway = new Y.Doc();
 		try {
 			Y.applyUpdate(throwaway, updateSinceLCA);
 			const svMap = Y.decodeStateVector(Y.encodeStateVector(throwaway));
-			this.idleMergeLog(`[same-user] clientIDs in update: [${Array.from(svMap.keys()).join(', ')}]`);
 			if (svMap.size === 0) return new Set();
 
 			// Build clientId → userId reverse index from remoteDoc's "users" Y.Map.
@@ -2453,14 +2445,16 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 			this.remoteDoc.getMap<Y.Array<number>>('users').forEach((arr, userId) => {
 				arr.toArray().forEach((clientId) => clientToUser.set(clientId, userId));
 			});
-			this.idleMergeLog(`[same-user] PUD entries: ${JSON.stringify(Array.from(clientToUser.entries()))}`);
+
+			if (flags().enableDeltaLogging) {
+				this.idleMergeLog(`[same-user] updateSinceLCA byteLength=${updateSinceLCA.byteLength} clientIDs=[${Array.from(svMap.keys()).join(', ')}] PUD=${JSON.stringify(Array.from(clientToUser.entries()))}`);
+			}
 
 			const authorIds = new Set<string>();
 			for (const clientId of svMap.keys()) {
 				const uid = clientToUser.get(clientId);
 				if (uid) authorIds.add(uid);
 			}
-			this.idleMergeLog(`[same-user] resolved authorIds: [${Array.from(authorIds).join(', ')}]`);
 			return authorIds;
 		} finally {
 			throwaway.destroy();
@@ -2484,16 +2478,16 @@ export class MergeHSM implements TestableHSM, MachineHSM, SyncBridgeHost {
 
 		// 'same-user': confirm all remote-since-LCA ops are self-authored
 		const lcaSV = this._lca?.stateVector;
-		this.idleMergeLog(`[same-user] resolveAutoResolveMode: path=${this.path} userId=${this._userId ?? 'none'} hasLCA=${!!lcaSV}`);
 		if (!lcaSV || !this._userId) return null;
 
 		const authorIds = this.getRemoteAuthorUserIds(lcaSV);
-		this.idleMergeLog(`[same-user] authorIds=[${Array.from(authorIds).join(', ')}] localUserId=${this._userId}`);
 		if (authorIds.size === 1 && authorIds.has(this._userId)) {
-			this.idleMergeLog('[same-user] BYPASS: sole remote author is self → local wins');
+			this.idleMergeLog(`[same-user] BYPASS ${this.path}: sole remote author is self (${this._userId})`);
 			return 'local'; // sole remote author is self → disk wins
 		}
-		this.idleMergeLog('[same-user] NO-BYPASS: different author or no PUD → show conflict UI');
+		if (flags().enableDeltaLogging) {
+			this.idleMergeLog(`[same-user] no-bypass ${this.path}: authorIds=[${Array.from(authorIds).join(', ')}] userId=${this._userId}`);
+		}
 		return null; // different author, or no PUD mapping → show conflict UI
 	}
 
