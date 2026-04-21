@@ -325,11 +325,9 @@
 	<ToastManager />
 {/if}
 
-{#if plugin.manifest.version !== plugin.version}
-	<span class="relay-version">
-		{plugin.version}
-	</span>
-{/if}
+<span class="relay-version">
+	v{plugin.manifest.version}
+</span>
 
 <style>
 	.relay-version {
